@@ -8,15 +8,20 @@ DOJO_CTX="$DOJO_STATE_DIR/ctx.tsv"
 DOJO_ERR="$DOJO_STATE_DIR/stderr.log"
 mkdir -p "$DOJO_STATE_DIR" 2>/dev/null
 
-__dojo_last=""
+__dojo_last_num=""
 
 __dojo_hook() {
-  local code=$? cmd off
+  local code=$? cmd off num
+
+  # 用历史编号去重，别用命令内容，不然连着敲两条一样的，第二条会被吞
+  num=${HISTCMD:-}
+  if [ -n "$num" ] && [ "$num" = "$__dojo_last_num" ]; then
+    return $code
+  fi
 
   cmd=$(fc -ln -1 2>/dev/null | sed 's/^[[:space:]]*//')
   [ -z "$cmd" ] && return $code
-  [ "$cmd" = "$__dojo_last" ] && return $code
-  __dojo_last=$cmd
+  __dojo_last_num=$num
 
   cmd=${cmd//$'\n'/ }
   cmd=${cmd//$'\x1f'/ }
