@@ -30,7 +30,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.1"
+VERSION = "0.2.0"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -374,30 +374,96 @@ def _clean_args(tokens):
     return out
 
 
-def targets(cmd):
-    """猜这条命令会碰哪些路径，用来做快照。宁可少猜，不要乱删。"""
-    paths = []
-    for m in REDIR_RE.finditer(cmd):
-        p = m.group(1).strip("'\"")
-        if p and not p.startswith("&"):
-            paths.append(p)
-    try:
-        tokens = shlex.split(cmd, comments=True)
-    except ValueError:
-        tokens = cmd.split()
-    name = os.path.basename(unwrap(tokens))
-    args = tokens[1:] if tokens else []
-    if tokens and tokens[0] == "sudo":
-        # 重新取 sudo 之后的参数
-        j = 0
-        while j < len(tokens) and tokens[j] != "sudo":
-            j += 1
-        j += 1
-        while j < len(tokens) and tokens[j].startswith("-"):
-            j += 1
-        name = os.path.basename(tokens[j]) if j < len(tokens) else ""
-        args = tokens[j + 1:] if j + 1 <= len(tokens) else []
+SHELL_META = ("$(", "`", "xargs", "eval ")
+WRITERS_BY_NATURE = {
+    "unzip", "tar", "gzip", "gunzip", "xz", "unxz", "zip", "7z",
+    "patch", "git", "rsync", "wget", "curl", "cpio",
+}
+RISKY_ROOTS = ("/", "/etc", "/usr", "/var", "/opt", "/boot", "/sys", "/proc", "/dev")
 
+
+def iter_segments(cmd):
+    """按 && || | ; 换行 切段，引号里的不算"""
+    segs, buf, quote = [], [], None
+    i = 0
+    while i < len(cmd):
+        ch = cmd[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote and (i == 0 or cmd[i - 1] != "\\"):
+                quote = None
+        elif ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+        elif cmd.startswith("&&", i) or cmd.startswith("||", i):
+            segs.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        elif ch in (";", "|", "\n"):
+            segs.append("".join(buf))
+            buf = []
+        else:
+            buf.append(ch)
+        i += 1
+    segs.append("".join(buf))
+    return [x.strip() for x in segs if x.strip()]
+
+
+def _cmd_args(tokens):
+    """返回 (命令名, 参数)，跳过 sudo 和环境变量"""
+    i = 0
+    while i < len(tokens):
+        t = tokens[i]
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", t):
+            i += 1
+            continue
+        if t == "sudo":
+            i += 1
+            while i < len(tokens) and tokens[i].startswith("-"):
+                if tokens[i] in ("-u", "-g"):
+                    i += 2
+                else:
+                    i += 1
+            continue
+        if t in ("env", "command", "exec", "nohup", "time"):
+            i += 1
+            continue
+        break
+    if i >= len(tokens):
+        return "", []
+    return os.path.basename(tokens[i]), tokens[i + 1:]
+
+
+def _find_targets(args):
+    """把 find ... -delete 的命中项先列出来，用来做快照"""
+    cleaned, i = [], 0
+    while i < len(args):
+        t = args[i]
+        if t == "-delete":
+            i += 1
+            continue
+        if t == "-exec":
+            break
+        cleaned.append(t)
+        i += 1
+    roots = [a for a in cleaned if not a.startswith("-") and "=" not in a]
+    for r in roots:
+        rp = os.path.abspath(os.path.expanduser(r))
+        if rp in RISKY_ROOTS or rp.startswith(("/etc", "/usr", "/var", "/opt", "/boot", "/sys", "/proc", "/dev")):
+            return [], "find 的范围太大（%s），不敢做快照" % rp
+    try:
+        p = subprocess.run(["find"] + cleaned + ["-print0"], capture_output=True, timeout=10)
+    except Exception as e:
+        return [], "find 预演失败：%s" % e
+    found = [x.decode("utf-8", "replace") for x in p.stdout.split(b"\0") if x]
+    if len(found) > 500:
+        return [], "find 命中太多（%d 个），不敢逐个快照" % len(found)
+    return found, ""
+
+
+def _targets_for(name, args, seg):
+    paths = []
     vals = _clean_args(args)
     if name in ("cp", "mv", "ln", "install"):
         if len(vals) >= 2:
@@ -407,7 +473,7 @@ def targets(cmd):
     elif name in ("rm", "rmdir", "touch", "mkdir", "tee", "truncate"):
         paths.extend(vals)
     elif name == "sed":
-        if "-i" in cmd or "--in-place" in cmd:
+        if "-i" in seg or "--in-place" in seg:
             paths.extend(vals[1:] if vals else [])
     elif name in ("chmod", "chown", "chgrp"):
         if len(vals) >= 2:
@@ -416,7 +482,10 @@ def targets(cmd):
         for t in vals:
             if t.startswith("of="):
                 paths.append(t[3:])
+    return paths
 
+
+def _normalize(paths):
     out, seen = [], set()
     for p in paths:
         if not p or p in ("/dev/null", "/dev/stdout", "/dev/stderr", "-"):
@@ -429,6 +498,47 @@ def targets(cmd):
         seen.add(p)
         out.append(p)
     return out
+
+
+def analyze(cmd):
+    """返回 (paths, coarse, unsupported)。coarse=True 表示整目录快照。"""
+    if "$(" in cmd or "`" in cmd:
+        return [], False, "命令里有命令替换，猜不到它会动哪些文件"
+    segs = iter_segments(cmd)
+    if any(re.search(r"(^|\s)xargs(\s|$)", s) for s in segs):
+        return [], False, "用了 xargs，参数是运行时才知道的"
+    if any(re.search(r"(^|\s)eval(\s|$)", s) for s in segs):
+        return [], False, "用了 eval，后面要跑什么看不出来"
+
+    paths, coarse = [], False
+    for seg in segs:
+        try:
+            tokens = shlex.split(seg, comments=True)
+        except ValueError:
+            return [], False, "命令里的引号没配对，解析不了"
+        if not tokens:
+            continue
+        for m in REDIR_RE.finditer(seg):
+            p = m.group(1).strip("'\"")
+            if p and not p.startswith("&"):
+                paths.append(p)
+        name, args = _cmd_args(tokens)
+        if name == "find" and ("-delete" in tokens or "-exec" in tokens):
+            found, err = _find_targets(args)
+            if err:
+                return [], False, err
+            paths.extend(found)
+            continue
+        paths.extend(_targets_for(name, args, seg))
+        if name in WRITERS_BY_NATURE and not paths:
+            coarse = True
+
+    return _normalize(paths), coarse, ""
+
+
+def targets(cmd):
+    """兼容旧接口：只要路径列表"""
+    return analyze(cmd)[0]
 
 
 def _tree_size(path, limit):
@@ -453,11 +563,20 @@ class Snapshot:
         self.cmd = cmd
         self.cfg = cfg
         self.records = []
+        self.coarse = False
+        self.unsupported = ""
 
     def capture(self):
         limit = int(self.cfg["exec"].get("max_snapshot_mb", 200)) * 1024 * 1024
+        paths, coarse, unsupported = analyze(self.cmd)
+        self.coarse = coarse
+        self.unsupported = unsupported
+        if unsupported:
+            return self.records
+        if coarse:
+            paths = [os.getcwd()]
         os.makedirs(self.dir, exist_ok=True)
-        for idx, path in enumerate(targets(self.cmd)):
+        for idx, path in enumerate(paths):
             rec = {"path": path, "existed": os.path.lexists(path)}
             if rec["existed"]:
                 try:
@@ -741,11 +860,18 @@ class Runner:
             snap = Snapshot(run.dir, i, cmd, self.cfg)
             if kind == "reversible":
                 snap.capture()
+                if snap.unsupported:
+                    print(f"  （猜不准会动什么：{snap.unsupported}。跑坏了撤不回来，你自己掂量）")
+                elif snap.coarse:
+                    print("  （命令里有管道或解压这类，整个目录做快照，可能要等一下）")
             else:
                 print("  （系统级操作，做不了可靠快照，停下后只能给反向命令）")
             self.current_snapshot = snap
             rc, stopped = self._run_one(cmd)
             run.add_step(cmd, kind, snap, rc)
+            run.data["steps"][-1]["coarse"] = snap.coarse
+            run.data["steps"][-1]["unsupported"] = snap.unsupported
+            run.save()
             append_ctx(rc, cwd, cmd)
             if stopped:
                 self.halted = True
@@ -791,24 +917,37 @@ def cmd_do(cfg, args, level, yes=False):
             return
     if not q:
         return
-    rows = read_ctx(int(cfg["context"]["history"]))
-    msgs = build_messages(cfg, rows, q + "\n\n" + PLAN_HINT, level)
-    text = call_model(cfg, msgs, stream=False, max_tokens=900)
-    print("老王：")
-    print(text.strip())
-    cmds = extract_commands(text)
-    if not cmds:
-        return
-    print("\n它给的命令：")
-    for i, c in enumerate(cmds, 1):
-        print(f"  {i}. {c}")
-    if level < 5:
-        print("\n你现在的等级还不到 L5，它不会替你跑。自己敲，或者 dojo level 5。")
-        return
-    if not sys.stdin.isatty() and not yes:
-        print("\n没有交互终端，不执行。加 --yes 可以跳过确认（不建议）。")
-        return
-    Runner(cfg, yes=yes).execute(cmds)
+
+    question = q
+    for _ in range(5):
+        rows = read_ctx(int(cfg["context"]["history"]))
+        msgs = build_messages(cfg, rows, question + "\n\n" + PLAN_HINT, level)
+        text = call_model(cfg, msgs, stream=False, max_tokens=900)
+        print("老王：")
+        print(text.strip())
+        cmds = extract_commands(text)
+        if not cmds:
+            return
+        print("\n它给的命令：")
+        for i, c in enumerate(cmds, 1):
+            print(f"  {i}. {c}")
+        if level < 5:
+            print("\n你现在的等级还不到 L5，它不会替你跑。自己敲，或者 dojo level 5。")
+            return
+        if not sys.stdin.isatty() and not yes:
+            print("\n没有交互终端，不执行。加 --yes 可以跳过确认（不建议）。")
+            return
+        Runner(cfg, yes=yes).execute(cmds)
+        if yes or not sys.stdin.isatty():
+            return
+        try:
+            nxt = input("\n接着改？说一句想改什么，直接回车结束: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not nxt:
+            return
+        question = nxt
 
 
 def cmd_run(cfg, args, level, yes=False):

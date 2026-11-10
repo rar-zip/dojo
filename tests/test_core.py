@@ -59,6 +59,35 @@ class TestParse(unittest.TestCase):
         self.assertEqual(self.m.targets("sed -i 's/a/b/' f.txt"),
                          [os.path.join(self.tmp, "f.txt")])
 
+    def test_analyze_pipe_and_tee(self):
+        got = self.m.analyze("echo hi | tee out.txt")
+        self.assertEqual(got[0], [os.path.join(self.tmp, "out.txt")])
+
+    def test_analyze_xargs_unsupported(self):
+        paths, coarse, why = self.m.analyze("cat list.txt | xargs rm")
+        self.assertEqual(paths, [])
+        self.assertIn("xargs", why)
+
+    def test_analyze_command_substitution(self):
+        paths, coarse, why = self.m.analyze("echo $(cat a) > b.txt")
+        self.assertEqual(paths, [])
+        self.assertIn("命令替换", why)
+
+    def test_analyze_coarse_for_unzip(self):
+        paths, coarse, why = self.m.analyze("unzip pkg.zip")
+        self.assertEqual(paths, [])
+        self.assertTrue(coarse)
+
+    def test_analyze_find_delete(self):
+        os.makedirs(os.path.join(self.tmp, "logs"), exist_ok=True)
+        f1 = os.path.join(self.tmp, "logs", "a.log")
+        f2 = os.path.join(self.tmp, "logs", "b.log")
+        for f in (f1, f2):
+            open(f, "w").write("x")
+        paths, coarse, why = self.m.analyze("find logs -name '*.log' -delete")
+        self.assertEqual(sorted(paths), sorted([f1, f2]))
+        self.assertEqual(why, "")
+
     def test_classify(self):
         self.assertEqual(self.m.classify("apt install nginx"), "irreversible")
         self.assertEqual(self.m.classify("sudo systemctl restart nginx"), "irreversible")
@@ -120,7 +149,7 @@ class TestCLI(unittest.TestCase):
         self.conf_dir = os.path.join(self.home, ".config", "dojo")
         os.makedirs(self.conf_dir)
         with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
-            f.write("[assist]\nlevel = 5\n[model]\nstream = false\n")
+            f.write("[assist]\nlevel = 5\n[model]\nstream = false\n[stop]\ntimeout_seconds = 2\n")
         self.env = dict(os.environ, HOME=self.home, DOJO_CONFIG=os.path.join(self.conf_dir, "config.toml"),
                         DOJO_STATE_DIR=os.path.join(self.home, ".local", "state", "dojo"))
         self.work = tempfile.mkdtemp(prefix="dojo-work-")
@@ -163,6 +192,64 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(path))
         self.run_dojo("undo")
         self.assertEqual(readfile(path), "keep")
+
+    def test_undo_pipe_written_file(self):
+        path = os.path.join(self.work, "pipe.txt")
+        r = self.run_dojo("run", "--yes", "echo hi | tee pipe.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertTrue(os.path.exists(path))
+        self.run_dojo("undo")
+        self.assertFalse(os.path.exists(path))
+
+    def test_brake_default_rollback(self):
+        import pty
+        import select
+        import signal
+        import time
+
+        master, slave = pty.openpty()
+        env = dict(self.env)
+        proc = subprocess.Popen(
+            [sys.executable, DOJO, "run", "sleep 30; echo x > brake.txt"],
+            stdin=slave, stdout=slave, stderr=slave, env=env, cwd=self.work,
+            preexec_fn=os.setsid,
+        )
+        os.close(slave)
+
+        def read_until(marker, timeout=15):
+            buf = b""
+            end = time.time() + timeout
+            while time.time() < end:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                    if marker in buf:
+                        return buf
+            return buf
+
+        try:
+            out = read_until("要跑吗".encode())
+            self.assertIn("要跑吗", out.decode("utf-8", "replace"))
+            os.write(master, b"\n")
+            time.sleep(0.6)
+            os.killpg(proc.pid, signal.SIGINT)
+            out = read_until("选 1-4".encode())
+            self.assertIn("选 1-4", out.decode("utf-8", "replace"))
+            # 什么都不按，等默认超时回滚
+            out = read_until("已中断".encode(), timeout=15)
+            self.assertIn("已中断", out.decode("utf-8", "replace"))
+            proc.wait(timeout=10)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.kill()
+        self.assertFalse(os.path.exists(os.path.join(self.work, "brake.txt")))
 
     def test_level_gate(self):
         with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
