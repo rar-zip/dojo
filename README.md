@@ -55,6 +55,7 @@ dojo upgrade
 ```bash
 dojo chat                   # 连着聊，问不清楚可以追问
 dojo                        # 当前状态
+dojo status                 # 详细状态
 dojo ask "这报错啥意思"      # 问一句就走
 dojo explain                # 解释上一条命令（带退出码和 stderr）
 dojo run "把日志里 500 的行数出来"   # 说人话，它出方案，L5 下逐步确认执行
@@ -67,6 +68,8 @@ dojo stop                   # 让正在跑的任务停手
 dojo level 3                # 切协助等级
 dojo log                    # 看它眼里的上下文
 dojo doctor                 # 自检
+dojo config get exec.ttl_days   # 看/改配置
+dojo uninstall              # 干净卸载（--purge 连状态一起删）
 ```
 
 ## 聊天
@@ -129,6 +132,16 @@ Ctrl+C 一次不会直接杀命令，先弹四个选项：
 
 `dojo undo` 默认撤最近一步，`dojo undo all` 撤最近一次运行的全部步骤。
 
+## 安全红线
+
+有些东西它不替你碰，也不替你撤：
+
+- `rm -rf /`、`rm -rf ~`、`mkfs`、`fdisk`、fork 炸弹直接拒绝，不是弹窗，是根本不跑
+- 目标落在 `/etc`、`/boot`、`/usr`、`/var/lib`、`/sys`、`/proc` 的写删操作，按 `safety.deny_paths` 硬拦
+- 高风险删除、`dd`、`shred` 会在跑之前提示，`safety.require_typed_confirm = true` 时还要手打「确认」
+- 命令和对话里像 `sk-...`、`password=...`、`Bearer ...` 的东西，写日志和存档前会打码
+- 单步执行超过 `exec.max_step_seconds`（默认 600 秒）自动中断并回滚
+
 ## 配置
 
 `~/.config/dojo/config.toml`（600）
@@ -150,6 +163,13 @@ capture_stderr = false
 
 [exec]
 max_snapshot_mb = 200
+max_step_seconds = 600
+ttl_days = 7
+
+[safety]
+redact_secrets = true
+deny_paths = ["/etc", "/boot", "/usr", "/var/lib", "/sys", "/proc"]
+require_typed_confirm = false
 
 [stop]
 ask = true

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
-"""dojo 核心回归测试：解析、快照、回滚、CLI 端到端"""
+"""dojo 核心回归测试：解析、策略引擎、脱敏、快照、回滚、CLI 端到端"""
+import importlib.util
+from importlib.machinery import SourceFileLoader
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
-import importlib.util
-from importlib.machinery import SourceFileLoader
 
 ROOT = os.path.dirname(os.path.dirname(os.path.realpath(__file__)))
 DOJO = os.path.join(ROOT, "bin", "dojo")
@@ -22,7 +22,7 @@ def load_module():
 
 
 def readfile(path):
-    with open(path) as f:
+    with open(path, encoding="utf-8") as f:
         return f.read()
 
 
@@ -51,6 +51,20 @@ class TestParse(unittest.TestCase):
         self.assertEqual(self.m.targets("rm -rf ./tmpdir"),
                          [os.path.join(self.tmp, "tmpdir")])
 
+    def test_targets_rm_cp_mv_with_force_flag(self):
+        self.assertEqual(self.m.targets("rm -f a.txt"),
+                         [os.path.join(self.tmp, "a.txt")])
+        self.assertEqual(self.m.targets("cp -f src.txt dst.txt"),
+                         [os.path.join(self.tmp, "dst.txt")])
+        self.assertEqual(self.m.targets("mv -f src.txt dst.txt"),
+                         [os.path.join(self.tmp, "dst.txt"), os.path.join(self.tmp, "src.txt")])
+
+    def test_targets_cp_into_existing_dir(self):
+        sub = os.path.join(self.tmp, "exist_dir")
+        os.makedirs(sub, exist_ok=True)
+        got = self.m.targets("cp foo.txt exist_dir")
+        self.assertEqual(got, [os.path.join(sub, "foo.txt")])
+
     def test_targets_mv_keeps_source(self):
         got = self.m.targets("mv a.txt b.txt")
         self.assertEqual(got, [os.path.join(self.tmp, "b.txt"), os.path.join(self.tmp, "a.txt")])
@@ -58,6 +72,10 @@ class TestParse(unittest.TestCase):
     def test_targets_sed_inplace(self):
         self.assertEqual(self.m.targets("sed -i 's/a/b/' f.txt"),
                          [os.path.join(self.tmp, "f.txt")])
+        self.assertEqual(self.m.targets("sed -i -e 's/a/b/' f2.txt"),
+                         [os.path.join(self.tmp, "f2.txt")])
+        self.assertEqual(self.m.targets("sed -i.bak 's/a/b/' f3.txt"),
+                         [os.path.join(self.tmp, "f3.txt"), os.path.join(self.tmp, "f3.txt.bak")])
 
     def test_analyze_pipe_and_tee(self):
         got = self.m.analyze("echo hi | tee out.txt")
@@ -83,34 +101,41 @@ class TestParse(unittest.TestCase):
         f1 = os.path.join(self.tmp, "logs", "a.log")
         f2 = os.path.join(self.tmp, "logs", "b.log")
         for f in (f1, f2):
-            open(f, "w").write("x")
+            with open(f, "w", encoding="utf-8") as fp:
+                fp.write("x")
         paths, coarse, why = self.m.analyze("find logs -name '*.log' -delete")
         self.assertEqual(sorted(paths), sorted([f1, f2]))
         self.assertEqual(why, "")
 
-    def test_download_with_progress(self):
-        import http.server
-        import threading
-
-        os.makedirs(os.path.join(self.tmp, "srv"), exist_ok=True)
-        with open(os.path.join(self.tmp, "srv", "pkg.sh"), "wb") as f:
-            f.write(b"x" * 40000)
-        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
-            *a, directory=os.path.join(self.tmp, "srv"), **kw)
-        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        t = threading.Thread(target=srv.serve_forever, daemon=True)
-        t.start()
-        try:
-            url = f"http://127.0.0.1:{srv.server_address[1]}/pkg.sh"
-            data = self.m.download_with_progress(url)
-            self.assertEqual(len(data), 40000)
-        finally:
-            srv.shutdown()
-
-    def test_classify(self):
+    def test_classify_and_compound(self):
         self.assertEqual(self.m.classify("apt install nginx"), "irreversible")
         self.assertEqual(self.m.classify("sudo systemctl restart nginx"), "irreversible")
+        self.assertEqual(self.m.classify("echo ok && sudo systemctl restart nginx"), "irreversible")
         self.assertEqual(self.m.classify("echo hi > f"), "reversible")
+
+    def test_suggest_inverse(self):
+        self.assertIn("sudo apt remove nginx", self.m.suggest_inverse("sudo apt install -y nginx"))
+        self.assertIn("sudo systemctl stop redis", self.m.suggest_inverse("systemctl start redis"))
+        self.assertIn("pip3 uninstall requests", self.m.suggest_inverse("pip3 install requests"))
+
+    def test_policy_engine_blocks_deny_paths_and_destructive(self):
+        cfg = self.m.load_config()
+        ok1, risk1, _ = self.m.check_policy("echo hack > /etc/passwd", cfg)
+        self.assertFalse(ok1)
+        self.assertEqual(risk1, "blocked")
+        ok2, risk2, _ = self.m.check_policy("rm -rf /", cfg)
+        self.assertFalse(ok2)
+        self.assertEqual(risk2, "blocked")
+        ok3, risk3, _ = self.m.check_policy("mkfs.ext4 /dev/sdb1", cfg)
+        self.assertFalse(ok3)
+        self.assertEqual(risk3, "blocked")
+
+    def test_redact_sensitive(self):
+        raw = "export DEEPSEEK_API_KEY=sk-1234567890abcdef1234 password=mysecret99 Authorization: Bearer abcdef12345678"
+        cleaned = self.m.redact_sensitive(raw)
+        self.assertNotIn("sk-1234567890abcdef1234", cleaned)
+        self.assertNotIn("mysecret99", cleaned)
+        self.assertIn("REDACTED", cleaned)
 
     def test_build_messages_with_history(self):
         cfg = self.m.load_config()
@@ -143,9 +168,9 @@ class TestSnapshot(unittest.TestCase):
 
     def test_restore_existing_file(self):
         path = os.path.join(self.tmp, "a.txt")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("old")
-        snap = self.m.Snapshot(self.run_dir, 1, "rm a.txt", self.cfg)
+        snap = self.m.Snapshot(self.run_dir, 1, "rm -f a.txt", self.cfg)
         snap.capture()
         os.unlink(path)
         snap.restore()
@@ -156,15 +181,23 @@ class TestSnapshot(unittest.TestCase):
         path = os.path.join(self.tmp, "new.txt")
         snap = self.m.Snapshot(self.run_dir, 1, "echo x > new.txt", self.cfg)
         snap.capture()
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("x")
         snap.restore()
         self.assertFalse(os.path.exists(path))
 
+    def test_remove_created_nested_mkdir_p(self):
+        leaf = os.path.join(self.tmp, "p1", "p2", "p3")
+        snap = self.m.Snapshot(self.run_dir, 1, "mkdir -p p1/p2/p3", self.cfg)
+        snap.capture()
+        os.makedirs(leaf, exist_ok=True)
+        snap.restore()
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "p1")))
+
     def test_restore_dir(self):
         d = os.path.join(self.tmp, "d")
         os.makedirs(d)
-        with open(os.path.join(d, "x"), "w") as f:
+        with open(os.path.join(d, "x"), "w", encoding="utf-8") as f:
             f.write("1")
         snap = self.m.Snapshot(self.run_dir, 1, "rm -rf d", self.cfg)
         snap.capture()
@@ -172,13 +205,26 @@ class TestSnapshot(unittest.TestCase):
         snap.restore()
         self.assertEqual(readfile(os.path.join(d, "x")), "1")
 
+    def test_restore_symlink(self):
+        target = os.path.join(self.tmp, "real.txt")
+        link = os.path.join(self.tmp, "sym.txt")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("hello")
+        os.symlink(target, link)
+        snap = self.m.Snapshot(self.run_dir, 1, "rm sym.txt", self.cfg)
+        snap.capture()
+        os.unlink(link)
+        snap.restore()
+        self.assertTrue(os.path.islink(link))
+        self.assertEqual(os.readlink(link), target)
+
 
 class TestCLI(unittest.TestCase):
     def setUp(self):
         self.home = tempfile.mkdtemp(prefix="dojo-home-")
         self.conf_dir = os.path.join(self.home, ".config", "dojo")
         os.makedirs(self.conf_dir)
-        with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
+        with open(os.path.join(self.conf_dir, "config.toml"), "w", encoding="utf-8") as f:
             f.write("[assist]\nlevel = 5\n[model]\nstream = false\n[stop]\ntimeout_seconds = 2\n")
         self.env = dict(os.environ, HOME=self.home, DOJO_CONFIG=os.path.join(self.conf_dir, "config.toml"),
                         DOJO_STATE_DIR=os.path.join(self.home, ".local", "state", "dojo"))
@@ -227,11 +273,23 @@ class TestCLI(unittest.TestCase):
         self.assertEqual(r.returncode, 0)
         self.assertIn("三步就能用", r.stdout)
 
-    def test_init_writes_hook(self):
+    def test_init_and_uninstall_hook(self):
         rc = os.path.join(self.home, ".bashrc")
         r = self.run_dojo("init")
         self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn(">>> dojo >>>", open(rc).read())
+        with open(rc, encoding="utf-8") as f:
+            self.assertIn(">>> dojo >>>", f.read())
+        u = self.run_dojo("uninstall", "--yes")
+        self.assertEqual(u.returncode, 0, u.stderr)
+        with open(rc, encoding="utf-8") as f:
+            self.assertNotIn(">>> dojo >>>", f.read())
+
+    def test_config_set_and_get(self):
+        r1 = self.run_dojo("config", "set", "assist.level=4")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        r2 = self.run_dojo("config", "get", "assist.level")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(r2.stdout.strip(), "4")
 
     def test_run_and_undo_created_file(self):
         path = os.path.join(self.work, "x.txt")
@@ -244,9 +302,9 @@ class TestCLI(unittest.TestCase):
 
     def test_run_and_undo_deleted_file(self):
         path = os.path.join(self.work, "y.txt")
-        with open(path, "w") as f:
+        with open(path, "w", encoding="utf-8") as f:
             f.write("keep")
-        r = self.run_dojo("exec", "--yes", "rm y.txt")
+        r = self.run_dojo("exec", "--yes", "rm -f y.txt")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(os.path.exists(path))
         self.run_dojo("undo")
@@ -259,6 +317,11 @@ class TestCLI(unittest.TestCase):
         self.assertTrue(os.path.exists(path))
         self.run_dojo("undo")
         self.assertFalse(os.path.exists(path))
+
+    def test_policy_blocks_protected_path_in_cli(self):
+        r = self.run_dojo("exec", "--yes", "echo bad > /etc/dojo_test_forbidden")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("安全拦截", r.stderr)
 
     def test_brake_default_rollback(self):
         import pty
@@ -300,7 +363,6 @@ class TestCLI(unittest.TestCase):
             os.killpg(proc.pid, signal.SIGINT)
             out = read_until("选 1-4".encode())
             self.assertIn("选 1-4", out.decode("utf-8", "replace"))
-            # 什么都不按，等默认超时回滚
             out = read_until("已中断".encode(), timeout=15)
             self.assertIn("已中断", out.decode("utf-8", "replace"))
             proc.wait(timeout=10)
@@ -317,9 +379,9 @@ class TestCLI(unittest.TestCase):
         shutil.copy2(DOJO, cur)
         os.chmod(cur, 0o755)
         fake = os.path.join(self.work, "fake_update.sh")
-        with open(fake, "w") as f:
+        with open(fake, "w", encoding="utf-8") as f:
             f.write("#!/usr/bin/env bash\nset -e\nmkdir -p \"$HOME/.local/bin\"\n"
-                    "sed 's/^VERSION = .*/VERSION = \"9.9.9\"/' "
+                    "sed 's/^VERSION = \".*\"/VERSION = \"9.9.9\"/' "
                     + DOJO + " > \"$HOME/.local/bin/dojo\"\n"
                     "chmod +x \"$HOME/.local/bin/dojo\"\n")
         env = dict(self.env, DOJO_INSTALL_URL="file://" + fake)
@@ -330,15 +392,8 @@ class TestCLI(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertIn("9.9.9", v.stdout)
 
-    def test_nl_run_needs_model(self):
-        # run 是自然语言入口，没 key 时不该退化成直接执行
-        path = os.path.join(self.work, "nl.txt")
-        r = self.run_dojo("run", "--yes", "echo hi > nl.txt")
-        self.assertNotEqual(r.returncode, 0)
-        self.assertFalse(os.path.exists(path))
-
     def test_level_gate(self):
-        with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
+        with open(os.path.join(self.conf_dir, "config.toml"), "w", encoding="utf-8") as f:
             f.write("[assist]\nlevel = 3\n")
         r = self.run_dojo("exec", "--yes", "echo hi > z.txt")
         self.assertNotEqual(r.returncode, 0)
@@ -350,14 +405,6 @@ class TestCLI(unittest.TestCase):
         self.assertIn("现在没有在跑的任务", r.stdout)
         halt = os.path.join(self.env["DOJO_STATE_DIR"], "halt")
         self.assertFalse(os.path.exists(halt))
-
-    def test_commands_log(self):
-        self.run_dojo("exec", "--yes", "echo hi > c.txt")
-        r = self.run_dojo("commands")
-        self.assertEqual(r.returncode, 0, r.stderr)
-        self.assertIn("echo hi > c.txt", r.stdout)
-        log = os.path.join(self.env["DOJO_STATE_DIR"], "commands.log")
-        self.assertTrue(os.path.exists(log))
 
     def test_history_lists_runs(self):
         self.run_dojo("exec", "--yes", "echo hi > h.txt")
@@ -385,6 +432,109 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(b))
         # a.txt 属于更早的一次运行，undo all 只撤最近一次
         self.assertTrue(os.path.exists(a))
+
+
+
+class TestExtra(unittest.TestCase):
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-extra-")
+        self.conf_dir = os.path.join(self.home, ".config", "dojo")
+        os.makedirs(self.conf_dir)
+        with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
+            f.write("[assist]\nlevel = 5\n[model]\nstream = false\n[stop]\ntimeout_seconds = 2\n")
+        self.env = dict(os.environ, HOME=self.home,
+                        DOJO_CONFIG=os.path.join(self.conf_dir, "config.toml"),
+                        DOJO_STATE_DIR=os.path.join(self.home, ".local", "state", "dojo"))
+        self.work = tempfile.mkdtemp(prefix="dojo-extra-work-")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def run_dojo(self, *args):
+        return subprocess.run([sys.executable, DOJO, *args], env=self.env, cwd=self.work,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_commands_log(self):
+        self.run_dojo("exec", "--yes", "echo hi > c.txt")
+        r = self.run_dojo("commands")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("echo hi > c.txt", r.stdout)
+        log = os.path.join(self.env["DOJO_STATE_DIR"], "commands.log")
+        self.assertTrue(os.path.exists(log))
+
+    def test_nl_run_needs_model(self):
+        path = os.path.join(self.work, "nl.txt")
+        r = self.run_dojo("run", "--yes", "echo hi > nl.txt")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(path))
+
+    def test_chat_exit(self):
+        import pty
+        import select
+        import time
+        master, slave = pty.openpty()
+        proc = subprocess.Popen([sys.executable, DOJO, "chat"], stdin=slave, stdout=slave,
+                                stderr=slave, env=self.env, cwd=self.work, preexec_fn=os.setsid)
+        os.close(slave)
+        buf = b""
+        end = time.time() + 10
+        try:
+            while time.time() < end:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    buf += os.read(master, 4096)
+                if "你>".encode() in buf:
+                    break
+            os.write(master, b"/exit\n")
+            proc.wait(timeout=10)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0)
+
+    def test_upgrade_from_url(self):
+        bindir = os.path.join(self.home, ".local", "bin")
+        os.makedirs(bindir)
+        cur = os.path.join(bindir, "dojo")
+        shutil.copy2(DOJO, cur)
+        os.chmod(cur, 0o755)
+        fake = os.path.join(self.work, "fake_update.sh")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\nset -e\nmkdir -p \"$HOME/.local/bin\"\n"
+                    "sed 's/^VERSION = .*/VERSION = \"9.9.9\"/' " + DOJO +
+                    " > \"$HOME/.local/bin/dojo\"\nchmod +x \"$HOME/.local/bin/dojo\"\n")
+        env = dict(self.env, DOJO_INSTALL_URL="file://" + fake)
+        r = subprocess.run([sys.executable, cur, "upgrade", "--yes"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        v = subprocess.run([sys.executable, cur, "version"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("9.9.9", v.stdout)
+
+    def test_download_with_progress(self):
+        import http.server
+        import threading
+        srv_dir = os.path.join(self.work, "srv")
+        os.makedirs(srv_dir)
+        with open(os.path.join(srv_dir, "pkg.sh"), "wb") as f:
+            f.write(b"x" * 40000)
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(*a, directory=srv_dir, **kw)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        try:
+            url = "http://127.0.0.1:%d/pkg.sh" % srv.server_address[1]
+            out = subprocess.run([sys.executable, "-c",
+                "from importlib.machinery import SourceFileLoader\n"
+                "import importlib.util\n"
+                "l=SourceFileLoader('d','%s'); s=importlib.util.spec_from_loader('d',l)\n"
+                "m=importlib.util.module_from_spec(s); l.exec_module(m)\n"
+                "print(len(m.download_with_progress('%s')))" % (DOJO, url)],
+                env=self.env, capture_output=True, text=True, timeout=60)
+            self.assertEqual(out.stdout.strip(), "40000", out.stderr)
+        finally:
+            srv.shutdown()
 
 
 if __name__ == "__main__":
