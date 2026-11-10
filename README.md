@@ -46,6 +46,7 @@ dojo do "把日志里 500 的行数出来"   # 让它给方案，L5 下逐步确
 dojo run "df -h"            # 直接跑一条（L5，仍要确认）
 dojo undo                   # 撤掉最近一步
 dojo undo all               # 撤掉最近一次运行的全部步骤
+dojo history                # 看运行记录
 dojo stop                   # 让正在跑的任务停手
 dojo level 3                # 切协助等级
 dojo log                    # 看它眼里的上下文

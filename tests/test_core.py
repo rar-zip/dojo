@@ -133,6 +133,18 @@ class TestCLI(unittest.TestCase):
         return subprocess.run([sys.executable, DOJO, *args], env=self.env, cwd=self.work,
                               capture_output=True, text=True, timeout=60)
 
+    def test_quickstart_without_config(self):
+        os.unlink(os.path.join(self.conf_dir, "config.toml"))
+        r = self.run_dojo()
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("三步就能用", r.stdout)
+
+    def test_init_writes_hook(self):
+        rc = os.path.join(self.home, ".bashrc")
+        r = self.run_dojo("init")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn(">>> dojo >>>", open(rc).read())
+
     def test_run_and_undo_created_file(self):
         path = os.path.join(self.work, "x.txt")
         r = self.run_dojo("run", "--yes", "echo hi > x.txt")
@@ -158,6 +170,30 @@ class TestCLI(unittest.TestCase):
         r = self.run_dojo("run", "--yes", "echo hi > z.txt")
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.work, "z.txt")))
+
+    def test_stop_without_active_run(self):
+        r = self.run_dojo("stop")
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("现在没有在跑的任务", r.stdout)
+        halt = os.path.join(self.env["DOJO_STATE_DIR"], "halt")
+        self.assertFalse(os.path.exists(halt))
+
+    def test_history_lists_runs(self):
+        self.run_dojo("run", "--yes", "echo hi > h.txt")
+        r = self.run_dojo("history")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("1 步", r.stdout)
+
+    def test_undo_specific_run(self):
+        a = os.path.join(self.work, "a1.txt")
+        b = os.path.join(self.work, "b1.txt")
+        self.run_dojo("run", "--yes", "echo 1 > a1.txt")
+        self.run_dojo("run", "--yes", "echo 2 > b1.txt")
+        runs = sorted(os.listdir(os.path.join(self.env["DOJO_STATE_DIR"], "runs")))
+        r = self.run_dojo("undo", runs[0])
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(a))
+        self.assertTrue(os.path.exists(b))
 
     def test_undo_all(self):
         a = os.path.join(self.work, "a.txt")

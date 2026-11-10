@@ -30,7 +30,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.1.0"
+VERSION = "0.1.1"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -38,6 +38,7 @@ CTX_PATH = os.path.join(STATE_DIR, "ctx.tsv")
 ERR_PATH = os.path.join(STATE_DIR, "stderr.log")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 HALT_PATH = os.path.join(STATE_DIR, "halt")
+ACTIVE_PATH = os.path.join(STATE_DIR, "active.json")
 
 DEFAULTS = {
     "model": {
@@ -581,6 +582,26 @@ class Runner:
         self.yes = yes
         self.halted = False
         self.current_snapshot = None
+        # 清掉上一次遗留的停止标记，免得一启动就自己停
+        try:
+            if os.path.exists(HALT_PATH):
+                os.unlink(HALT_PATH)
+        except OSError:
+            pass
+
+    def _active_write(self, run_id=None):
+        try:
+            os.makedirs(STATE_DIR, exist_ok=True)
+            with open(ACTIVE_PATH, "w") as f:
+                json.dump({"pid": os.getpid(), "started": int(time.time()), "run": run_id}, f)
+        except OSError:
+            pass
+
+    def _active_clear(self):
+        try:
+            os.unlink(ACTIVE_PATH)
+        except OSError:
+            pass
 
     def _halted_flag(self):
         if os.path.exists(HALT_PATH):
@@ -683,6 +704,14 @@ class Runner:
             return 1
         run = None
         cwd = os.getcwd()
+        self._active_write()
+        try:
+            return self._execute(cmds, cwd, run)
+        finally:
+            self._active_clear()
+
+    def _execute(self, cmds, cwd, run):
+
         for i, cmd in enumerate(cmds, 1):
             if self.halted or self._halted_flag():
                 print("收到停止请求，后面的不跑了。")
@@ -707,6 +736,7 @@ class Runner:
                         continue
             if run is None:
                 run = Run(cwd)
+                self._active_write(run.id)
             kind = classify(cmd)
             snap = Snapshot(run.dir, i, cmd, self.cfg)
             if kind == "reversible":
@@ -858,16 +888,21 @@ def cmd_log(cfg):
 
 
 def cmd_undo(cfg, args):
-    run_id = latest_run()
+    rest = list(args)
+    run_id = None
+    if rest and re.match(r"^\d{8}-\d{6}-\d+$", rest[0]):
+        run_id = rest.pop(0)
+    if not run_id:
+        run_id = latest_run()
     if not run_id:
         print("没有可撤的运行。")
         return
     data, run_dir = load_run(run_id)
-    todo_all = bool(args and args[0] == "all")
+    todo_all = bool(rest and rest[0] == "all")
     n = 1
-    if args and args[0] != "all":
+    if rest and rest[0] != "all":
         try:
-            n = max(1, int(args[0]))
+            n = max(1, int(rest[0]))
         except ValueError:
             eprint("用法：dojo undo [N|all]")
             sys.exit(1)
@@ -895,7 +930,56 @@ def cmd_undo(cfg, args):
     print("撤完了。")
 
 
+def _active_run():
+    try:
+        with open(ACTIVE_PATH) as f:
+            data = json.load(f)
+    except Exception:
+        return None
+    pid = data.get("pid")
+    if not isinstance(pid, int):
+        return None
+    try:
+        os.kill(pid, 0)
+    except OSError:
+        return None
+    return data
+
+
+def cmd_history(cfg, args):
+    if not os.path.isdir(RUNS_DIR):
+        print("还没有运行记录。")
+        return
+    limit = 10
+    if args and args[0].isdigit():
+        limit = max(1, int(args[0]))
+    ids = sorted(d for d in os.listdir(RUNS_DIR) if os.path.isdir(os.path.join(RUNS_DIR, d)))
+    if not ids:
+        print("还没有运行记录。")
+        return
+    for run_id in reversed(ids[-limit:]):
+        try:
+            data, _ = load_run(run_id)
+        except Exception:
+            continue
+        steps = data.get("steps", [])
+        undone = sum(1 for x in steps if x.get("undone"))
+        q = (data.get("question") or "").strip().replace("\n", " ")[:40]
+        when = time.strftime("%m-%d %H:%M", time.localtime(data.get("created", 0)))
+        print(f"{run_id}  {when}  {len(steps)} 步  已撤 {undone}  {q}")
+    print("\n撤某一次：dojo undo <运行ID> [步数|all]")
+
+
 def cmd_stop():
+    data = _active_run()
+    if not data:
+        # 没有在跑的任务，顺手清掉可能残留的旧标记
+        try:
+            os.unlink(HALT_PATH)
+        except OSError:
+            pass
+        print("现在没有在跑的任务。")
+        return
     os.makedirs(STATE_DIR, exist_ok=True)
     with open(HALT_PATH, "w") as f:
         f.write(str(time.time()))
@@ -930,6 +1014,36 @@ def cmd_doctor(cfg):
     print("结论       " + ("能干活" if ok else "还差点，看上面 × 的行"))
 
 
+def save_api_key(key):
+    os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
+    text = ""
+    if os.path.exists(CONFIG_PATH):
+        with open(CONFIG_PATH) as f:
+            text = f.read()
+    line = 'api_key = "%s"' % key.replace('"', "")
+    if "[model]" not in text:
+        text = text.rstrip() + "\n\n[model]\n" + line + "\n"
+    else:
+        out, in_model, done = [], False, False
+        for raw in text.splitlines():
+            if raw.strip().startswith("["):
+                if in_model and not done:
+                    out.append(line)
+                    done = True
+                in_model = raw.strip() == "[model]"
+            if in_model and raw.strip().startswith("api_key") and "=" in raw:
+                out.append(line)
+                done = True
+                continue
+            out.append(raw)
+        if in_model and not done:
+            out.append(line)
+        text = "\n".join(out) + "\n"
+    with open(CONFIG_PATH, "w") as f:
+        f.write(text)
+    os.chmod(CONFIG_PATH, 0o600)
+
+
 def cmd_init():
     shell = os.path.basename(os.environ.get("SHELL", "bash"))
     rc = os.path.expanduser("~/.zshrc" if shell == "zsh" else "~/.bashrc")
@@ -955,10 +1069,46 @@ def cmd_init():
             text = f.read()
     if "# >>> dojo >>>" in text:
         print(f"hook 已经在 {rc} 里了")
-        return
-    with open(rc, "a") as f:
-        f.write(block)
-    print(f"已写入 {rc}，新开一个终端或 source 一下生效")
+    else:
+        with open(rc, "a") as f:
+            f.write(block)
+        print(f"已写入 {rc}，新开一个终端或 source 一下生效")
+
+    cfg = load_config()
+    if not resolve_key(cfg):
+        if sys.stdin.isatty():
+            try:
+                from getpass import getpass
+                key = getpass("还没配 API key，粘贴一个（回车跳过）：").strip()
+            except (EOFError, KeyboardInterrupt):
+                key = ""
+            if key:
+                save_api_key(key)
+                print(f"key 已写进 {CONFIG_PATH}（600）")
+        else:
+            print("还没配 API key：设 DEEPSEEK_API_KEY，或写进配置文件的 [model]")
+
+
+def quickstart(cfg):
+    key = resolve_key(cfg)
+    level = int(cfg["assist"]["level"])
+    print("dojo 还没配好，三步就能用：")
+    print()
+    if not key:
+        print("1) 填 API key")
+        print("   export DEEPSEEK_API_KEY=***")
+        print(f"   或者写进 {CONFIG_PATH} 的 [model] api_key")
+    else:
+        print("1) API key ✓")
+    print()
+    print("2) 装上命令记录（新开终端生效）")
+    print("   dojo init")
+    print()
+    print("3) 试一句")
+    print('   dojo ask "这个报错什么意思"')
+    print()
+    print(f"现在是 L{level}：{LEVEL_RULES.get(level, '')}")
+    print("想让它代跑：dojo level 5")
 
 
 def usage():
@@ -970,6 +1120,7 @@ def usage():
         "  dojo do \"想做的事\"        让它给方案（L5 下逐步确认执行）\n"
         "  dojo run \"命令\"           直接跑一条（要 L5，要确认）\n"
         "  dojo undo [N|all]        回滚最近的运行\n"
+        "  dojo history [N]          看运行记录\n"
         "  dojo stop                让正在跑的任务停下\n"
         "  dojo level [1-5]         看/切协助等级\n"
         "  dojo log                 看它眼里的上下文\n"
@@ -985,7 +1136,10 @@ def main():
     cmd = args[0] if args else ""
 
     if cmd == "":
-        cmd_status(cfg)
+        if not os.path.exists(CONFIG_PATH) or not resolve_key(cfg):
+            quickstart(cfg)
+        else:
+            cmd_status(cfg)
     elif cmd == "ask":
         cmd_ask(cfg, args[1:], level)
     elif cmd == "explain":
@@ -996,6 +1150,8 @@ def main():
         cmd_run(cfg, args[1:], level, yes="--yes" in args)
     elif cmd == "undo":
         cmd_undo(cfg, args[1:])
+    elif cmd in ("history", "runs"):
+        cmd_history(cfg, args[1:])
     elif cmd == "stop":
         cmd_stop()
     elif cmd == "level":
