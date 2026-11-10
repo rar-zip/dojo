@@ -88,6 +88,25 @@ class TestParse(unittest.TestCase):
         self.assertEqual(sorted(paths), sorted([f1, f2]))
         self.assertEqual(why, "")
 
+    def test_download_with_progress(self):
+        import http.server
+        import threading
+
+        os.makedirs(os.path.join(self.tmp, "srv"), exist_ok=True)
+        with open(os.path.join(self.tmp, "srv", "pkg.sh"), "wb") as f:
+            f.write(b"x" * 40000)
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(
+            *a, directory=os.path.join(self.tmp, "srv"), **kw)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        t = threading.Thread(target=srv.serve_forever, daemon=True)
+        t.start()
+        try:
+            url = f"http://127.0.0.1:{srv.server_address[1]}/pkg.sh"
+            data = self.m.download_with_progress(url)
+            self.assertEqual(len(data), 40000)
+        finally:
+            srv.shutdown()
+
     def test_classify(self):
         self.assertEqual(self.m.classify("apt install nginx"), "irreversible")
         self.assertEqual(self.m.classify("sudo systemctl restart nginx"), "irreversible")
@@ -331,6 +350,14 @@ class TestCLI(unittest.TestCase):
         self.assertIn("现在没有在跑的任务", r.stdout)
         halt = os.path.join(self.env["DOJO_STATE_DIR"], "halt")
         self.assertFalse(os.path.exists(halt))
+
+    def test_commands_log(self):
+        self.run_dojo("exec", "--yes", "echo hi > c.txt")
+        r = self.run_dojo("commands")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("echo hi > c.txt", r.stdout)
+        log = os.path.join(self.env["DOJO_STATE_DIR"], "commands.log")
+        self.assertTrue(os.path.exists(log))
 
     def test_history_lists_runs(self):
         self.run_dojo("exec", "--yes", "echo hi > h.txt")

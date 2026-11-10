@@ -44,7 +44,7 @@ wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.
 dojo upgrade
 ```
 
-它会去拉最新的安装脚本，问一句，然后覆盖 `~/.local/bin/dojo`，旧版备份在 `~/.local/state/dojo/backup/`
+它会带进度条拉最新的安装脚本，问一句，然后覆盖 `~/.local/bin/dojo`，旧版备份在 `~/.local/state/dojo/backup/`
 
 源码装的：`cd ~/dojo && git pull && ./install.sh`
 
@@ -62,6 +62,7 @@ dojo exec "df -h"           # 直接跑一条字面命令（L5，仍要确认）
 dojo undo                   # 撤掉最近一步
 dojo undo all               # 撤掉最近一次运行的全部步骤
 dojo history                # 看运行记录
+dojo commands               # 看代跑过的每一条命令（统一日志）
 dojo stop                   # 让正在跑的任务停手
 dojo level 3                # 切协助等级
 dojo log                    # 看它眼里的上下文
@@ -185,6 +186,16 @@ rm -f ~/.local/bin/dojo
 # 删掉 shell 配置里 # >>> dojo >>> 到 # <<< dojo <<< 之间的块
 rm -rf ~/.config/dojo ~/.local/state/dojo ~/.local/share/dojo
 ```
+
+## 命令都记在哪
+
+L5 代跑过的每一条命令都会追加到 `~/.local/state/dojo/commands.log`，带时间、运行 ID、第几步、退出码：
+
+```
+2026-11-10 21:14:54  run=20261110-211454-468407  #1/1  rc=0  echo one > a.txt
+```
+
+`dojo commands` 看最近 20 条，`dojo commands 100` 看更多。日志只留最近两千行，不会无限长。
 
 ## 开发
 

@@ -39,6 +39,7 @@ ERR_PATH = os.path.join(STATE_DIR, "stderr.log")
 RUNS_DIR = os.path.join(STATE_DIR, "runs")
 HALT_PATH = os.path.join(STATE_DIR, "halt")
 ACTIVE_PATH = os.path.join(STATE_DIR, "active.json")
+COMMANDS_LOG = os.path.join(STATE_DIR, "commands.log")
 
 DEFAULTS = {
     "model": {
@@ -729,7 +730,6 @@ class Runner:
         return False
 
     def _run_one(self, cmd):
-        print(f"\n$ {cmd}\n", flush=True)
         proc = subprocess.Popen(cmd, shell=True, executable="/bin/bash", start_new_session=True)
         old = signal.signal(signal.SIGINT, self._on_int)
         try:
@@ -853,6 +853,7 @@ class Runner:
             if run is None:
                 run = Run(cwd)
                 self._active_write(run.id)
+            print(f"\n第 {i}/{len(cmds)} 步 · {cmd}\n", flush=True)
             kind = classify(cmd)
             snap = Snapshot(run.dir, i, cmd, self.cfg)
             if kind == "reversible":
@@ -865,7 +866,9 @@ class Runner:
                 print("  （系统级操作，做不了可靠快照，停下后只能给反向命令）")
             self.current_snapshot = snap
             rc, stopped = self._run_one(cmd)
+            print(f"  退出码 {rc}")
             run.add_step(cmd, kind, snap, rc)
+            log_command(run.id, i, len(cmds), cmd, rc)
             run.data["steps"][-1]["coarse"] = snap.coarse
             run.data["steps"][-1]["unsupported"] = snap.unsupported
             run.save()
@@ -1196,6 +1199,41 @@ def cmd_undo(cfg, args):
     print("撤完了。")
 
 
+def log_command(run_id, step, total, cmd, rc):
+    """所有代跑过的命令都往一个地方记，方便回头查"""
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        line = "%s  run=%s  #%d/%d  rc=%s  %s\n" % (
+            time.strftime("%Y-%m-%d %H:%M:%S"), run_id, step, total, rc, cmd)
+        with open(COMMANDS_LOG, "a") as f:
+            f.write(line)
+        os.chmod(COMMANDS_LOG, 0o600)
+        with open(COMMANDS_LOG) as f:
+            rows = f.readlines()
+        if len(rows) > 2000:
+            with open(COMMANDS_LOG, "w") as f:
+                f.writelines(rows[-1000:])
+    except OSError:
+        pass
+
+
+def cmd_commands(cfg, args):
+    if not os.path.exists(COMMANDS_LOG):
+        print("还没有代跑过命令。")
+        return
+    limit = 20
+    if args and args[0].isdigit():
+        limit = max(1, int(args[0]))
+    with open(COMMANDS_LOG, errors="replace") as f:
+        rows = [r.rstrip("\n") for r in f if r.strip()]
+    if not rows:
+        print("还没有代跑过命令。")
+        return
+    for r in rows[-limit:]:
+        print(r)
+    print(f"\n全在 {COMMANDS_LOG}，要更多就 dojo commands 50")
+
+
 def _active_run():
     try:
         with open(ACTIVE_PATH) as f:
@@ -1259,12 +1297,37 @@ UPDATE_URL = os.environ.get(
 )
 
 
+def download_with_progress(url, timeout=30):
+    req = urllib.request.Request(url, headers={"User-Agent": "dojo/%s" % VERSION})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        total = int(r.headers.get("Content-Length") or 0)
+        chunks, got = [], 0
+        while True:
+            chunk = r.read(16384)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+            if sys.stdout.isatty():
+                if total:
+                    pct = min(100, got * 100 // total)
+                    filled = pct * 24 // 100
+                    sys.stdout.write("\r  [%s%s] %3d%%  %d/%d KB" % (
+                        "#" * filled, "-" * (24 - filled), pct, got // 1024, total // 1024))
+                else:
+                    sys.stdout.write("\r  已下载 %d KB" % (got // 1024))
+                sys.stdout.flush()
+        if sys.stdout.isatty():
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+    return b"".join(chunks)
+
+
 def cmd_upgrade(args):
     yes = "--yes" in args
     print(f"从 {UPDATE_URL} 拉最新版")
     try:
-        with urllib.request.urlopen(UPDATE_URL, timeout=30) as r:
-            data = r.read()
+        data = download_with_progress(UPDATE_URL)
     except Exception as e:
         eprint(f"拉不下来：{e}")
         eprint("网络不通的话，手动重跑安装脚本，或者源码目录里 git pull 再 ./install.sh")
@@ -1434,6 +1497,7 @@ def usage():
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo undo [N|all]        回滚最近的运行\n"
         "  dojo history [N]          看运行记录\n"
+        "  dojo commands [N]         看代跑过的命令（统一日志）\n"
         "  dojo stop                让正在跑的任务停下\n"
         "  dojo level [1-5]         看/切协助等级\n"
         "  dojo log                 看它眼里的上下文\n"
@@ -1470,6 +1534,8 @@ def main():
         cmd_undo(cfg, args[1:])
     elif cmd in ("history", "runs"):
         cmd_history(cfg, args[1:])
+    elif cmd == "commands":
+        cmd_commands(cfg, args[1:])
     elif cmd == "stop":
         cmd_stop()
     elif cmd == "level":
