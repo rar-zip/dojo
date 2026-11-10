@@ -39,8 +39,9 @@ wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.
 ## 用
 
 ```bash
+dojo chat                   # 连着聊，问不清楚可以追问
 dojo                        # 当前状态
-dojo ask "这报错啥意思"      # 问一句
+dojo ask "这报错啥意思"      # 问一句就走
 dojo explain                # 解释上一条命令（带退出码和 stderr）
 dojo do "把日志里 500 的行数出来"   # 让它给方案，L5 下逐步确认执行
 dojo run "df -h"            # 直接跑一条（L5，仍要确认）
@@ -52,6 +53,21 @@ dojo level 3                # 切协助等级
 dojo log                    # 看它眼里的上下文
 dojo doctor                 # 自检
 ```
+
+## 聊天
+
+`dojo chat` 是个常驻的对话，直接打字提问，接着上次的上下文继续，退出也不丢：
+
+```
+你> HTTP 是跑在什么上的
+老王：TCP，80 和 443 那两个端口。HTTP/3 例外，底下是 UDP。
+你> 那它跟 TCP 的区别一句话
+老王：...
+```
+
+里面还有几条命令：`/run 命令` 直接跑（要 L5）、`/undo` 撤销、`/level` 切等级、`/log` 看上下文、`/clear` 清空对话、`/exit` 退出
+
+老王回话里如果带命令，L5 下会直接问你要不要跑，不用再打一遍 `dojo do`
 
 ## 协助等级
 

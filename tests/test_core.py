@@ -93,6 +93,17 @@ class TestParse(unittest.TestCase):
         self.assertEqual(self.m.classify("sudo systemctl restart nginx"), "irreversible")
         self.assertEqual(self.m.classify("echo hi > f"), "reversible")
 
+    def test_build_messages_with_history(self):
+        cfg = self.m.load_config()
+        msgs = self.m.build_messages(cfg, [], "第二问", 3, history=[
+            {"role": "user", "content": "第一问"},
+            {"role": "assistant", "content": "第一答"},
+        ])
+        self.assertEqual(msgs[0]["role"], "system")
+        self.assertEqual(msgs[1]["content"], "第一问")
+        self.assertEqual(msgs[2]["content"], "第一答")
+        self.assertEqual(msgs[-1]["content"], "第二问")
+
     def test_extract_commands(self):
         text = "先这样\n```bash\necho 1\necho 2\n```\n"
         self.assertEqual(self.m.extract_commands(text), ["echo 1", "echo 2"])
@@ -161,6 +172,35 @@ class TestCLI(unittest.TestCase):
     def run_dojo(self, *args):
         return subprocess.run([sys.executable, DOJO, *args], env=self.env, cwd=self.work,
                               capture_output=True, text=True, timeout=60)
+
+    def test_chat_exit(self):
+        import pty
+        import select
+        import time
+
+        master, slave = pty.openpty()
+        proc = subprocess.Popen(
+            [sys.executable, DOJO, "chat"],
+            stdin=slave, stdout=slave, stderr=slave, env=self.env, cwd=self.work,
+            preexec_fn=os.setsid,
+        )
+        os.close(slave)
+        buf = b""
+        end = time.time() + 10
+        try:
+            while time.time() < end:
+                r, _, _ = select.select([master], [], [], 0.2)
+                if r:
+                    buf += os.read(master, 4096)
+                if "你>".encode() in buf:
+                    break
+            os.write(master, b"/exit\n")
+            proc.wait(timeout=10)
+        finally:
+            os.close(master)
+            if proc.poll() is None:
+                proc.kill()
+        self.assertEqual(proc.returncode, 0)
 
     def test_quickstart_without_config(self):
         os.unlink(os.path.join(self.conf_dir, "config.toml"))
