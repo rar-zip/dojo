@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.4.1
+
+- 修 bash hook 在 `HISTCONTROL=ignoreboth` 下漏记连续相同命令的问题，改用 DEBUG trap 判断「真的执行了」
+- 修 zsh hook 用命令内容去重导致同样命令第二条被吞，改用历史编号
+- `stderr.log` 超过 512KB 自动截断，不再无限长
+- 加 GitHub Actions：每次 push 跑测试，并检查 dist 安装器是否跟源码同步
+- `docs/技术方案.md` 状态改成已实现，去掉「未开工」和 daemon 的错误描述
+
+
 ## 0.4.0
 
 这一版把 Gemini 那份优化逐条过了，能用的合进来，也补上了自己的两条。
