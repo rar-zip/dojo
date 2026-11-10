@@ -30,7 +30,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.0"
+VERSION = "0.3.1"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -1250,6 +1250,51 @@ def cmd_stop():
     print("想把这一步也撤掉，在跑 dojo 的那个终端按 Ctrl+C。")
 
 
+UPDATE_URL = os.environ.get(
+    "DOJO_INSTALL_URL",
+    "https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh",
+)
+
+
+def cmd_upgrade(args):
+    yes = "--yes" in args
+    print(f"从 {UPDATE_URL} 拉最新版")
+    try:
+        with urllib.request.urlopen(UPDATE_URL, timeout=30) as r:
+            data = r.read()
+    except Exception as e:
+        eprint(f"拉不下来：{e}")
+        eprint("网络不通的话，手动重跑安装脚本，或者源码目录里 git pull 再 ./install.sh")
+        sys.exit(1)
+    if b"dojo" not in data[:3000]:
+        eprint("下载回来的东西不像安装脚本，先不动")
+        sys.exit(1)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    tmp = os.path.join(STATE_DIR, "upgrade.sh")
+    with open(tmp, "wb") as f:
+        f.write(data)
+    if not yes:
+        if not sys.stdin.isatty():
+            eprint("没有交互终端，加 --yes 才会直接装")
+            sys.exit(1)
+        ans = input(f"现在是 {VERSION}，要装这个最新版吗？(Y/n) ").strip().lower()
+        if ans not in ("", "y", "yes"):
+            print("那先不动")
+            return
+    backup_dir = os.path.join(STATE_DIR, "backup")
+    try:
+        os.makedirs(backup_dir, exist_ok=True)
+        shutil.copy2(os.path.realpath(__file__), os.path.join(backup_dir, f"dojo-{VERSION}"))
+    except Exception:
+        pass
+    rc = subprocess.call(["bash", tmp])
+    if rc == 0:
+        print("升级完了，新开一个终端，或者敲 dojo version 看看")
+    else:
+        eprint(f"安装脚本返回 {rc}，旧版备份在 {backup_dir}")
+        sys.exit(rc)
+
+
 def cmd_doctor(cfg):
     ok = True
     print(f"python     {sys.version.split()[0]}")
@@ -1390,6 +1435,7 @@ def usage():
         "  dojo level [1-5]         看/切协助等级\n"
         "  dojo log                 看它眼里的上下文\n"
         "  dojo doctor              自检\n"
+        "  dojo upgrade             拉最新版装上\n"
         "  dojo init                装 shell hook\n"
     )
 
@@ -1439,6 +1485,8 @@ def main():
         cmd_log(cfg)
     elif cmd == "doctor":
         cmd_doctor(cfg)
+    elif cmd in ("upgrade", "update"):
+        cmd_upgrade(args[1:])
     elif cmd == "init":
         cmd_init()
     elif cmd in ("-V", "--version", "version"):

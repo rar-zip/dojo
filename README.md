@@ -36,6 +36,20 @@ wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.
 
 装完新开一个终端，`dojo doctor` 自检。
 
+## 升级
+
+一行装的，直接：
+
+```bash
+dojo upgrade
+```
+
+它会去拉最新的安装脚本，问一句，然后覆盖 `~/.local/bin/dojo`，旧版备份在 `~/.local/state/dojo/backup/`
+
+源码装的：`cd ~/dojo && git pull && ./install.sh`
+
+拉不下来通常是 raw.githubusercontent.com 被墙，挂个代理再试，或者用源码那条路
+
 ## 用
 
 ```bash

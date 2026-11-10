@@ -291,6 +291,26 @@ class TestCLI(unittest.TestCase):
                 proc.kill()
         self.assertFalse(os.path.exists(os.path.join(self.work, "brake.txt")))
 
+    def test_upgrade_from_url(self):
+        bindir = os.path.join(self.home, ".local", "bin")
+        os.makedirs(bindir)
+        cur = os.path.join(bindir, "dojo")
+        shutil.copy2(DOJO, cur)
+        os.chmod(cur, 0o755)
+        fake = os.path.join(self.work, "fake_update.sh")
+        with open(fake, "w") as f:
+            f.write("#!/usr/bin/env bash\nset -e\nmkdir -p \"$HOME/.local/bin\"\n"
+                    "sed 's/^VERSION = \"0.3.1\"/VERSION = \"9.9.9\"/' "
+                    + DOJO + " > \"$HOME/.local/bin/dojo\"\n"
+                    "chmod +x \"$HOME/.local/bin/dojo\"\n")
+        env = dict(self.env, DOJO_INSTALL_URL="file://" + fake)
+        r = subprocess.run([sys.executable, cur, "upgrade", "--yes"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        v = subprocess.run([sys.executable, cur, "version"], env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("9.9.9", v.stdout)
+
     def test_level_gate(self):
         with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
             f.write("[assist]\nlevel = 3\n")
