@@ -216,7 +216,7 @@ class TestCLI(unittest.TestCase):
 
     def test_run_and_undo_created_file(self):
         path = os.path.join(self.work, "x.txt")
-        r = self.run_dojo("run", "--yes", "echo hi > x.txt")
+        r = self.run_dojo("exec", "--yes", "echo hi > x.txt")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.path.exists(path))
         r = self.run_dojo("undo")
@@ -227,7 +227,7 @@ class TestCLI(unittest.TestCase):
         path = os.path.join(self.work, "y.txt")
         with open(path, "w") as f:
             f.write("keep")
-        r = self.run_dojo("run", "--yes", "rm y.txt")
+        r = self.run_dojo("exec", "--yes", "rm y.txt")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertFalse(os.path.exists(path))
         self.run_dojo("undo")
@@ -235,7 +235,7 @@ class TestCLI(unittest.TestCase):
 
     def test_undo_pipe_written_file(self):
         path = os.path.join(self.work, "pipe.txt")
-        r = self.run_dojo("run", "--yes", "echo hi | tee pipe.txt")
+        r = self.run_dojo("exec", "--yes", "echo hi | tee pipe.txt")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertTrue(os.path.exists(path))
         self.run_dojo("undo")
@@ -250,7 +250,7 @@ class TestCLI(unittest.TestCase):
         master, slave = pty.openpty()
         env = dict(self.env)
         proc = subprocess.Popen(
-            [sys.executable, DOJO, "run", "sleep 30; echo x > brake.txt"],
+            [sys.executable, DOJO, "exec", "sleep 30; echo x > brake.txt"],
             stdin=slave, stdout=slave, stderr=slave, env=env, cwd=self.work,
             preexec_fn=os.setsid,
         )
@@ -300,7 +300,7 @@ class TestCLI(unittest.TestCase):
         fake = os.path.join(self.work, "fake_update.sh")
         with open(fake, "w") as f:
             f.write("#!/usr/bin/env bash\nset -e\nmkdir -p \"$HOME/.local/bin\"\n"
-                    "sed 's/^VERSION = \"0.3.1\"/VERSION = \"9.9.9\"/' "
+                    "sed 's/^VERSION = .*/VERSION = \"9.9.9\"/' "
                     + DOJO + " > \"$HOME/.local/bin/dojo\"\n"
                     "chmod +x \"$HOME/.local/bin/dojo\"\n")
         env = dict(self.env, DOJO_INSTALL_URL="file://" + fake)
@@ -311,10 +311,17 @@ class TestCLI(unittest.TestCase):
                            capture_output=True, text=True, timeout=30)
         self.assertIn("9.9.9", v.stdout)
 
+    def test_nl_run_needs_model(self):
+        # run 是自然语言入口，没 key 时不该退化成直接执行
+        path = os.path.join(self.work, "nl.txt")
+        r = self.run_dojo("run", "--yes", "echo hi > nl.txt")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(path))
+
     def test_level_gate(self):
         with open(os.path.join(self.conf_dir, "config.toml"), "w") as f:
             f.write("[assist]\nlevel = 3\n")
-        r = self.run_dojo("run", "--yes", "echo hi > z.txt")
+        r = self.run_dojo("exec", "--yes", "echo hi > z.txt")
         self.assertNotEqual(r.returncode, 0)
         self.assertFalse(os.path.exists(os.path.join(self.work, "z.txt")))
 
@@ -326,7 +333,7 @@ class TestCLI(unittest.TestCase):
         self.assertFalse(os.path.exists(halt))
 
     def test_history_lists_runs(self):
-        self.run_dojo("run", "--yes", "echo hi > h.txt")
+        self.run_dojo("exec", "--yes", "echo hi > h.txt")
         r = self.run_dojo("history")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("1 步", r.stdout)
@@ -334,8 +341,8 @@ class TestCLI(unittest.TestCase):
     def test_undo_specific_run(self):
         a = os.path.join(self.work, "a1.txt")
         b = os.path.join(self.work, "b1.txt")
-        self.run_dojo("run", "--yes", "echo 1 > a1.txt")
-        self.run_dojo("run", "--yes", "echo 2 > b1.txt")
+        self.run_dojo("exec", "--yes", "echo 1 > a1.txt")
+        self.run_dojo("exec", "--yes", "echo 2 > b1.txt")
         runs = sorted(os.listdir(os.path.join(self.env["DOJO_STATE_DIR"], "runs")))
         r = self.run_dojo("undo", runs[0])
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -345,8 +352,8 @@ class TestCLI(unittest.TestCase):
     def test_undo_all(self):
         a = os.path.join(self.work, "a.txt")
         b = os.path.join(self.work, "b.txt")
-        self.run_dojo("run", "--yes", "echo 1 > a.txt")
-        self.run_dojo("run", "--yes", "echo 2 > b.txt")
+        self.run_dojo("exec", "--yes", "echo 1 > a.txt")
+        self.run_dojo("exec", "--yes", "echo 2 > b.txt")
         self.run_dojo("undo", "all")
         self.assertFalse(os.path.exists(b))
         # a.txt 属于更早的一次运行，undo all 只撤最近一次

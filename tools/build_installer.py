@@ -107,7 +107,7 @@ fi
 
 say ""
 say "装好了。新开一个终端，或者 source $RC"
-say "然后敲 dojo doctor 自检，dojo ask \"问题\" 开问"
+say "然后敲 dojo doctor 自检，dojo chat 直接开聊"
 '''
 
 

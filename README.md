@@ -57,8 +57,8 @@ dojo chat                   # 连着聊，问不清楚可以追问
 dojo                        # 当前状态
 dojo ask "这报错啥意思"      # 问一句就走
 dojo explain                # 解释上一条命令（带退出码和 stderr）
-dojo do "把日志里 500 的行数出来"   # 让它给方案，L5 下逐步确认执行
-dojo run "df -h"            # 直接跑一条（L5，仍要确认）
+dojo run "把日志里 500 的行数出来"   # 说人话，它出方案，L5 下逐步确认执行
+dojo exec "df -h"           # 直接跑一条字面命令（L5，仍要确认）
 dojo undo                   # 撤掉最近一步
 dojo undo all               # 撤掉最近一次运行的全部步骤
 dojo history                # 看运行记录
@@ -79,9 +79,9 @@ dojo doctor                 # 自检
 老王：...
 ```
 
-里面还有几条命令：`/run 命令` 直接跑（要 L5）、`/undo` 撤销、`/level` 切等级、`/log` 看上下文、`/clear` 清空对话、`/exit` 退出
+里面还有几条命令：`/run 想做的事` 让它出方案、`/exec 命令` 直接跑字面命令、`/undo` 撤销、`/level` 切等级、`/log` 看上下文、`/clear` 清空对话、`/exit` 退出
 
-老王回话里如果带命令，L5 下会直接问你要不要跑，不用再打一遍 `dojo do`
+老王回话里如果带命令，L5 下会直接问你要不要跑，不用再打一遍 `dojo run`
 
 ## 协助等级
 
@@ -93,7 +93,7 @@ dojo doctor                 # 自检
 | L4 | 代笔：给完整命令，你自己敲 |
 | L5 | 陪练：可以申请代跑，每条都要你点头 |
 
-L5 下 `dojo do "想做的事"` 的流程：
+L5 下 `dojo run "想做的事"` 的流程：
 
 1. 模型给出方案，命令放在代码块里，先全部打印出来
 2. 逐条问：`Enter 跑 / e 改 / s 跳过 / q 退出`
@@ -123,6 +123,8 @@ Ctrl+C 一次不会直接杀命令，先弹四个选项：
 - 解压、git、rsync 这类按性质整目录快照
 - **系统类**：apt / systemctl / pip / docker / kill / useradd 这些做不了可靠快照，只给反向命令，不假装能撤
 - 单个文件或目录超过 `exec.max_snapshot_mb`（默认 200MB）就不快照，并明确告诉你
+
+说人话那个入口是 `dojo run`，`dojo exec` 才是跑字面命令，别搞混
 
 `dojo undo` 默认撤最近一步，`dojo undo all` 撤最近一次运行的全部步骤。
 

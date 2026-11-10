@@ -85,4 +85,4 @@ esac
 say ""
 say "装好了。新开一个终端，或者 source 一下 shell 配置"
 say "然后敲 dojo doctor 自检，dojo ask \"问题\" 开问"
-say "想让它代跑：dojo level 5，然后 dojo do \"想做的事\""
+say "想让它代跑：dojo level 5，然后 dojo run \"想做的事\""

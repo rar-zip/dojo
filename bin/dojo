@@ -7,8 +7,8 @@
   dojo                     当前状态
   dojo ask "问题"           问一句
   dojo explain             解释上一条命令
-  dojo do "想做的事"        让它给方案；L5 下逐步确认执行
-  dojo run "命令"           直接跑一条（仍然要确认）
+  dojo run "想做的事"        说人话，它出方案；L5 下逐步确认执行
+  dojo exec "命令"           直接跑一条字面命令（仍然要确认）
   dojo undo [N|all]        回滚最近一次运行
   dojo stop                给正在跑的任务发停止请求
   dojo level [1-5]         看/切协助等级
@@ -30,7 +30,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.1"
+VERSION = "0.3.2"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -321,11 +321,6 @@ def stream_out(resp):
 
 
 # ---------------------------------------------------------------- 命令解析
-
-
-def split_commands(cmd):
-    """按 && / ; / | 切开？不切。整条交给 shell，快照只按关键词挑。"""
-    return cmd
 
 
 def unwrap(tokens):
@@ -909,7 +904,7 @@ def extract_commands(text):
     return cmds
 
 
-def cmd_do(cfg, args, level, yes=False):
+def cmd_do(cfg, args, level, yes=False, follow=True):
     q = " ".join(a for a in args if a != "--yes").strip()
     if not q:
         try:
@@ -940,7 +935,7 @@ def cmd_do(cfg, args, level, yes=False):
             print("\n没有交互终端，不执行。加 --yes 可以跳过确认（不建议）。")
             return
         Runner(cfg, yes=yes).execute(cmds)
-        if yes or not sys.stdin.isatty():
+        if not follow or yes or not sys.stdin.isatty():
             return
         try:
             nxt = input("\n接着改？说一句想改什么，直接回车结束: ").strip()
@@ -955,7 +950,7 @@ def cmd_do(cfg, args, level, yes=False):
 def cmd_run(cfg, args, level, yes=False):
     cmd = " ".join(a for a in args if a != "--yes").strip()
     if not cmd:
-        eprint("用法：dojo run \"命令\"")
+        eprint("用法：dojo exec \"命令\"")
         sys.exit(1)
     if level < 5:
         eprint(f"当前 L{level}，只有 L5 才能代跑。先 dojo level 5")
@@ -994,7 +989,8 @@ def save_chat(turns):
 
 def chat_help():
     print("  直接打字就是问老王，回车发出去")
-    print("  /run 命令     直接跑一条（要 L5）")
+    print("  /run 想做的事  让它出方案，L5 下逐步跑")
+    print("  /exec 命令     直接跑一条字面命令（要 L5）")
     print("  /undo [all]   撤上一步 / 整个任务")
     print("  /level [1-5]  看或切等级")
     print("  /log          看它眼里的上下文")
@@ -1054,9 +1050,16 @@ def cmd_chat(cfg, level, yes=False):
             cmd_undo(cfg, q.split()[1:])
             continue
         if low.startswith("/run"):
-            cmd = q[4:].strip()
+            text = q[4:].strip()
+            if not text:
+                print("  用法：/run 想做的事")
+                continue
+            cmd_do(cfg, [text], level, yes=yes, follow=False)
+            continue
+        if low.startswith("/exec"):
+            cmd = q[5:].strip()
             if not cmd:
-                print("  用法：/run 命令")
+                print("  用法：/exec 命令")
                 continue
             if level < 5:
                 print(f"  当前 L{level}，只有 L5 才能代跑")
@@ -1427,8 +1430,8 @@ def usage():
         "  dojo chat               连着聊，问不清楚可以追问\n"
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
-        "  dojo do \"想做的事\"        让它给方案（L5 下逐步确认执行）\n"
-        "  dojo run \"命令\"           直接跑一条（要 L5，要确认）\n"
+        "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
+        "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo undo [N|all]        回滚最近的运行\n"
         "  dojo history [N]          看运行记录\n"
         "  dojo stop                让正在跑的任务停下\n"
@@ -1457,9 +1460,11 @@ def main():
         cmd_chat(cfg, level, yes="--yes" in args)
     elif cmd == "explain":
         cmd_explain(cfg, level)
+    elif cmd == "run":
+        cmd_do(cfg, args[1:], level, yes="--yes" in args)
     elif cmd == "do":
         cmd_do(cfg, args[1:], level, yes="--yes" in args)
-    elif cmd == "run":
+    elif cmd in ("exec", "sh"):
         cmd_run(cfg, args[1:], level, yes="--yes" in args)
     elif cmd == "undo":
         cmd_undo(cfg, args[1:])
