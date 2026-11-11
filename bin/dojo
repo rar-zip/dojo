@@ -42,7 +42,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.1"
+VERSION = "0.5.2"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -1857,11 +1857,44 @@ def cmd_preview(cfg, args, level, yes=False, apply=True):
 PLAN_HINT = (
     "如果要动手，把命令放进一个 ```bash 代码块里，一行一条，按顺序。"
     "每条前面用一句话说明为什么。命令要能直接粘贴执行，别用占位符。"
-    "先侦察再动手没问题，但别侦察完就停：把后面真要做的也按顺序一起写出来。"
+    "必须一次给全：从查现状、到安装或修改、到验证结果，一条不漏。"
+    "只给一条侦察命令等于没给方案，会被打回重写。"
     "不要用 sudo，除非没有别的办法。"
 )
 
 DONE_MARK = "DONE"
+
+# 这些命令只读，不能算「把事做了」
+READ_ONLY_CMDS = {
+    "cat", "ls", "pwd", "uname", "whoami", "id", "groups", "df", "du", "free",
+    "ps", "grep", "egrep", "head", "tail", "wc", "stat", "file", "which",
+    "whereis", "type", "env", "printenv", "date", "uptime", "hostnamectl",
+    "lsb_release", "lsblk", "lscpu", "lspci", "ss", "netstat", "ip",
+    "readlink", "realpath",
+}
+
+
+def _first_cmd_name(cmd):
+    for seg in iter_segments(cmd):
+        try:
+            tokens = shlex.split(seg, comments=True)
+        except ValueError:
+            tokens = seg.split()
+        if not tokens:
+            continue
+        name, _ = _cmd_args(tokens)
+        if name:
+            return name
+    return ""
+
+
+def plan_is_recon_only(cmds):
+    """整份方案全是只读侦察，那就是没做完的方案。"""
+    if not cmds:
+        return False
+    names = [_first_cmd_name(c) for c in cmds]
+    names = [n for n in names if n]
+    return bool(names) and all(n in READ_ONLY_CMDS for n in names)
 
 
 def extract_commands(text):
@@ -1912,9 +1945,25 @@ def cmd_do(cfg, args, level, yes=False, follow=True):
                 return
             question = nxt
             continue
+        cmds = extract_commands(text)
+        if cmds and rnd == 0 and plan_is_recon_only(cmds):
+            # 只给「看看系统是什么」不算方案，打回让它补全，最多补一次
+            ask2 = (
+                ask
+                + "\n\n你上一份只给了这些命令："
+                + "；".join(cmds)
+                + "\n这只能算摸底，不算完成任务的方案。把剩下的步骤全部补上，"
+                "包括改完怎么验证成功。"
+            )
+            msgs2 = build_messages(cfg, rows, ask2 + "\n\n" + PLAN_HINT, level)
+            text2 = call_model(cfg, msgs2, stream=False, max_tokens=1200)
+            cmds2 = extract_commands(text2)
+            if cmds2 and not plan_is_recon_only(cmds2):
+                text, cmds = text2, cmds2
+            else:
+                print("（它还是只给了侦察命令，这份方案不完整，你自己掂量）")
         print(f"{persona_name}：")
         print(text.strip())
-        cmds = extract_commands(text)
         if not cmds:
             return
         print("\n它给的命令：")

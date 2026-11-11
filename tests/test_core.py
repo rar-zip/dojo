@@ -671,16 +671,15 @@ class TestHookStderrPTY(unittest.TestCase):
 
 
 class TestDoLoop(unittest.TestCase):
-    """dojo run 不能跑一步就收摊，没用完的上下轮耍接着跑"""
+    """dojo run 不能跑一步就收摊，也不能只给侦察命令当方案"""
 
-    def test_continues_until_done(self):
+    def _run(self, replies):
         import copy
         import types
         from unittest import mock
 
         m = load_module()
         cfg = copy.deepcopy(m.DEFAULTS)
-        replies = ["```bash\ncat /etc/os-release\n```", "DONE"]
         seen = []
 
         def fake_model(cfg_, msgs, **kw):
@@ -702,9 +701,22 @@ class TestDoLoop(unittest.TestCase):
              mock.patch.object(m.sys, "stdin", fake_stdin), \
              mock.patch("builtins.input", return_value=""):
             m.cmd_do(cfg, ["装个中文输入法"], 5)
-        # 第一轮抓到「已执行过」的上下文，第二轮模型才能接着往下给命令
-        self.assertGreaterEqual(len(seen), 2)
-        self.assertIn("已经执行过这些", seen[1][-1]["content"] if isinstance(seen[1][-1], dict) else str(seen[1]))
+        return m, seen
+
+    def test_continues_until_done(self):
+        plan = "```bash\nsudo apt install -y fcitx5\nfcitx5 --version\n```"
+        m, seen = self._run(["```bash\ncat /etc/os-release\n```", plan, "DONE"])
+        # 侦察被打回 → 完整方案 → DONE
+        self.assertGreaterEqual(len(seen), 3)
+        self.assertIn("这只能算摸底", str(seen[1]))
+        # 进入第二轮时带上了已执行记录
+        self.assertIn("已经执行过这些", str(seen[2]))
+
+    def test_recon_only_detection(self):
+        m = load_module()
+        self.assertTrue(m.plan_is_recon_only(["cat /etc/os-release", "uname -a"]))
+        self.assertFalse(m.plan_is_recon_only(["cat /etc/os-release", "sudo apt install -y fcitx5"]))
+        self.assertFalse(m.plan_is_recon_only([]))
 
 
 if __name__ == "__main__":
