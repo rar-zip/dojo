@@ -42,7 +42,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.2"
+VERSION = "0.5.3"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -403,12 +403,40 @@ def call_model(cfg, messages, stream=None, max_tokens=700):
     )
     timeout = float(cfg["model"].get("timeout_seconds") or 90)
     persona_name = cfg.get("persona", {}).get("name", "老王")
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+
+    def post(payload_obj):
+        req_ = urllib.request.Request(
+            url,
+            data=json.dumps(payload_obj).encode("utf-8"),
+            headers={
+                "Content-Type": "application/json",
+                "Authorization": "Bearer " + key,
+            },
+        )
+        with urllib.request.urlopen(req_, timeout=timeout) as resp:
             if stream:
                 return stream_out(resp, persona_name=persona_name)
-            data = json.loads(resp.read())
-            return data["choices"][0]["message"]["content"].strip()
+            return json.loads(resp.read())
+
+    try:
+        if stream:
+            return post(payload)
+        # 推理型模型会把预算先烧在思考上，截断了就等于没回答，重试一次加预算
+        budget = int(max_tokens)
+        for _ in range(3):
+            data = post({**payload, "max_tokens": budget})
+            choice = data["choices"][0]
+            text = (choice["message"].get("content") or "").strip()
+            truncated = choice.get("finish_reason") == "length"
+            if text and not truncated:
+                return text
+            if budget >= 4096:
+                if not text:
+                    eprint("（模型没有给出内容，可能是思考把预算烧光了）")
+                return text
+            budget = min(budget * 2, 4096)
+            # 静默重试，截断是推理模型常事，别拿这个吓人
+        return ""
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace")[:300]
         eprint(f"模型接口报错 {e.code}：{body}")
@@ -1859,6 +1887,7 @@ PLAN_HINT = (
     "每条前面用一句话说明为什么。命令要能直接粘贴执行，别用占位符。"
     "必须一次给全：从查现状、到安装或修改、到验证结果，一条不漏。"
     "只给一条侦察命令等于没给方案，会被打回重写。"
+    "不同发行版命令不一样的，用 if/elif 写成一段，别给两套并排的方案。"
     "不要用 sudo，除非没有别的办法。"
 )
 
@@ -1930,7 +1959,7 @@ def cmd_do(cfg, args, level, yes=False, follow=True):
         rows = read_ctx(int(cfg["context"]["history"]))
         ask = question + ("\n\n" + carried if carried else "")
         msgs = build_messages(cfg, rows, ask + "\n\n" + PLAN_HINT, level)
-        text = call_model(cfg, msgs, stream=False, max_tokens=900)
+        text = call_model(cfg, msgs, stream=False, max_tokens=1600)
         if rnd and text.strip().upper().startswith(DONE_MARK):
             print(f"\n{persona_name}说这活儿做完了。要改就接着说，不然回车结束")
             carried = ""
@@ -1956,7 +1985,7 @@ def cmd_do(cfg, args, level, yes=False, follow=True):
                 "包括改完怎么验证成功。"
             )
             msgs2 = build_messages(cfg, rows, ask2 + "\n\n" + PLAN_HINT, level)
-            text2 = call_model(cfg, msgs2, stream=False, max_tokens=1200)
+            text2 = call_model(cfg, msgs2, stream=False, max_tokens=1600)
             cmds2 = extract_commands(text2)
             if cmds2 and not plan_is_recon_only(cmds2):
                 text, cmds = text2, cmds2
