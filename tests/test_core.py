@@ -861,7 +861,7 @@ class TestAutoExplain(unittest.TestCase):
         m = self.m
         payload = ('{"cause": "命令名拼错了，系统里没有 notacommand", '
                    '"guess": "你想看一条命令在不在", '
-                   '"solutions": ["command -v notacommand 确认名字", "history | grep nota 翻一下"]}')
+                   '"solutions": ["`command -v notacommand`", "2. history | grep nota"]}')
         buf = io.StringIO()
         with mock.patch.object(m, "call_model", return_value=payload), \
              mock.patch.object(m.sys, "argv", ["dojo"]), \
@@ -871,6 +871,9 @@ class TestAutoExplain(unittest.TestCase):
         self.assertIn("原因  命令名拼错了", out)
         self.assertIn("猜测  你想看一条命令在不在", out)
         self.assertIn("1. command -v notacommand", out)
+        self.assertIn("2. history | grep nota", out)
+        self.assertNotIn("`", out)
+        self.assertNotIn("老王：", out)
         self.assertIn('dojo why', out)
 
     def test_error_card_falls_back_to_text(self):

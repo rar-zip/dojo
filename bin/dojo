@@ -2328,7 +2328,8 @@ ERROR_JSON_SPEC = (
     "只输出一个 JSON 对象，不要代码块、不要多余的话。字段："
     '"cause" 一句话说清楚为什么挂，先怀疑打字打错、命令不存在、参数不对这类低级问题；'
     '"guess" 一句话猜他本来想干什么；'
-    '"solutions" 数组，2 到 3 条具体怎么办，每条一句话，能直接给命令就给命令。'
+    '"solutions" 数组，2 到 3 条，每一条必须是能直接粘贴执行的单行命令，'
+    "不许写解释、不许写编号、不许用反引号、不许写占位符。"
 )
 
 
@@ -2345,13 +2346,23 @@ def _parse_json_loose(text):
     return data if isinstance(data, dict) else None
 
 
-def _print_error_card(data, persona_name="老王"):
+def _clean_solution(text):
+    """模型爱加反引号、编号、前缀，都剥掉，只留能跑的命令。"""
+    t = str(text).strip()
+    t = t.strip("`").strip()
+    t = re.sub(r"^\s*(\d+[.)]|[-*\u2022])\s*", "", t)
+    t = re.sub(r"^\$\s*", "", t)
+    return t.strip()
+
+
+def _print_error_card(data, persona_name=""):
     cause = str(data.get("cause") or "").strip()
     guess = str(data.get("guess") or "").strip()
     sols = data.get("solutions") or []
     if isinstance(sols, str):
         sols = [sols]
-    sols = [str(x).strip() for x in sols if str(x).strip()][:3]
+    sols = [_clean_solution(x) for x in sols if str(x).strip()][:3]
+    sols = [x for x in sols if x]
     if cause:
         print(f"原因  {cause}")
     if guess:
@@ -2377,7 +2388,6 @@ def error_messages(cfg, rows, row, question, level):
 def cmd_error_answer(cfg, level, row):
     """空敲 dojo，上一条挂了就先给结论：为什么挂、想干什么、怎么办。"""
     do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
-    persona_name = cfg.get("persona", {}).get("name", "老王")
     print(f"\n上一条命令挂了（退出码 {row['code']}）："
           f"{redact_sensitive(row['cmd'], enabled=do_redact)}")
     rows = read_ctx(int(cfg["context"]["history"]))
@@ -2396,10 +2406,10 @@ def cmd_error_answer(cfg, level, row):
         max_tokens=800,
     )
     data = _parse_json_loose(res)
-    if data and _print_error_card(data, persona_name):
+    if data and _print_error_card(data):
         pass
     else:
-        print(f"{persona_name}：{res.strip()}")
+        print(res.strip())
     print('\n都不对？dojo why "我其实想干什么"，它按你的目的重新给准确做法')
 
 
@@ -2430,10 +2440,10 @@ def cmd_why(cfg, args, level):
         max_tokens=800,
     )
     data = _parse_json_loose(res)
-    if data and _print_error_card(data, cfg.get("persona", {}).get("name", "老王")):
+    if data and _print_error_card(data):
         pass
     else:
-        print(f"{cfg.get('persona', {}).get('name', '老王')}：{res.strip()}")
+        print(res.strip())
     print('\n还想补一句？dojo why "补充说明" 或 dojo chat 接着聊')
 
 

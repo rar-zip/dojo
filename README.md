@@ -219,9 +219,11 @@ timeout_seconds = 15
 ```
 原因  127 就是 shell 找不到这个命令，八成是名字打错了
 猜测  你大概是想试某个命令，把占位符当真命令敲了
-方案  1. command -v notacommand 确认名字
-      2. 回到本来想跑的命令，检查拼写
+方案  1. command -v notacommand || echo 没有这个命令
+      2. type -a notacommand; echo $PATH
 ```
+
+方案那几行就是能直接粘进终端的命令，不是让你自己翻译的文字。
 
 方案都不对，直接说目的，让它重新算：
 
