@@ -60,6 +60,7 @@ dojo ask "这报错啥意思"      # 问一句就走
 dojo explain                # 解释上一条命令（带退出码和 stderr）
 dojo run "把日志里 500 的行数出来"   # 说人话，它出方案，L5 下逐步确认执行
 dojo exec "df -h"           # 直接跑一条字面命令（L5，仍要确认）
+dojo preview "rm -rf build"  # 沙盒里先跑一遍，看完再决定应用还是丢弃
 dojo undo                   # 撤掉最近一步
 dojo undo all               # 撤掉最近一次运行的全部步骤
 dojo history                # 看运行记录
@@ -130,6 +131,27 @@ Ctrl+C 一次不会直接杀命令，先弹四个选项：
 
 说人话那个入口是 `dojo run`，`dojo exec` 才是跑字面命令，别搞混
 
+## 沙盒预演（dojo preview）
+
+快照靠的是「跑前把目标文件复制一份」，碰到复杂脚本、`git clean`、`make clean` 这种猜不准的，就只能整目录快照，或者明说撤不回来。
+
+`dojo preview` 换了个思路：把当前目录套一层 overlayfs，命令在隔离层里跑，改完了先看清单，再决定应用还是丢掉。
+
+```bash
+dojo preview "rm -rf build && make"          # 跑完问你 1 应用 2 丢弃
+dojo preview --apply "sed -i 's/a/b/' x.txt"  # 不问，直接应用
+dojo preview --discard "..."                  # 不问，直接丢
+```
+
+跑完会列出 `新增 / 修改 / 删除` 清单，默认丢弃。丢弃的话真实文件一个字节都没动过。
+
+前提和边界：
+
+- 需要内核允许无特权用户命名空间（`unshare -Ur` 能跑），和 overlayfs 支持；现代发行版基本都有
+- 只隔离**当前目录这一层**。写 `~/xxx`、`/tmp`、`/etc` 还是真写，别拿它试 `sudo rm -rf /`
+- `apt`、`systemctl` 这种要 root 的，在沙盒里本来就跑不动，不是隔离问题
+- 沙盒目录在 `~/.local/state/dojo/sandbox/`，跑完就删
+
 `dojo undo` 默认撤最近一步，`dojo undo all` 撤最近一次运行的全部步骤。
 
 ## 安全红线
@@ -165,6 +187,8 @@ capture_stderr = false
 max_snapshot_mb = 200
 max_step_seconds = 600
 ttl_days = 7
+capture_output = true      # 代跑的输出存一份，dojo log 能回看
+output_max_kb = 512        # 超过就砍一半
 
 [safety]
 redact_secrets = true
@@ -178,10 +202,15 @@ timeout_seconds = 15
 
 ### capture_stderr
 
-默认关。打开后 shell 启动时把 stderr 复制一份到 `~/.local/state/dojo/stderr.log`，
-`dojo explain` 才能看到真正的报错文本。
+默认关。打开后 shell 启动时给 stderr 接一对 PTY：数据照旧显示在终端、`isatty(2)` 仍然是真（颜色不丢），同时留一份到 `~/.local/state/dojo/stderr.log`，`dojo explain` 就能看到真正的报错。
 
-代价：stderr 不再是 tty，少数程序（尤其带颜色的）输出行为会变。新手先别开。
+多了一个后台转发进程，退出 shell 自己会走。不喜欢就关掉。
+
+### capture_output
+
+默认开。`dojo run` / `dojo exec` 每次代跑都开 PTY，输出同时显示在终端并存进该次运行的 `output.log`（保留颜色和 `isatty`），`dojo log` 会带出最近一次输出的尾部。
+
+不想存就 `dojo config set exec.capture_output false`。
 
 ## 它看到什么
 

@@ -537,5 +537,137 @@ class TestExtra(unittest.TestCase):
             srv.shutdown()
 
 
+
+class TestPreviewAndCapture(unittest.TestCase):
+    """沙盒预演（overlayfs）与 PTY 输出捕获"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-home-")
+        conf_dir = os.path.join(self.home, ".config", "dojo")
+        os.makedirs(conf_dir)
+        with open(os.path.join(conf_dir, "config.toml"), "w", encoding="utf-8") as f:
+            f.write("[assist]\nlevel = 5\n[model]\nstream = false\n[stop]\ntimeout_seconds = 2\n")
+        self.env = dict(os.environ, HOME=self.home,
+                        DOJO_CONFIG=os.path.join(conf_dir, "config.toml"),
+                        DOJO_STATE_DIR=os.path.join(self.home, ".local", "state", "dojo"))
+        self.work = tempfile.mkdtemp(prefix="dojo-work-")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+        shutil.rmtree(self.work, ignore_errors=True)
+
+    def run_dojo(self, *args, timeout=60):
+        return subprocess.run([sys.executable, DOJO, *args], env=self.env, cwd=self.work,
+                              capture_output=True, text=True, timeout=timeout)
+
+    def userns_ok(self):
+        m = load_module()
+        return m.sandbox_available()[0]
+
+    def test_capture_preserves_tty_and_logs(self):
+        r = self.run_dojo("exec", "--yes",
+                          "if [ -t 1 ]; then echo OUT_TTY; else echo OUT_PIPE; fi; echo CAP_MARK")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("OUT_TTY", r.stdout)
+        self.assertIn("CAP_MARK", r.stdout)
+        runs = os.path.join(self.env["DOJO_STATE_DIR"], "runs")
+        logs = []
+        for d in os.listdir(runs):
+            p = os.path.join(runs, d, "output.log")
+            if os.path.exists(p):
+                logs.append(readfile(p))
+        self.assertTrue(any("CAP_MARK" in x for x in logs), logs)
+
+    def test_preview_discard_keeps_files(self):
+        if not self.userns_ok():
+            self.skipTest("内核不允许无特权用户命名空间")
+        r = self.run_dojo("preview", "--yes", "echo hi > a.txt")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertFalse(os.path.exists(os.path.join(self.work, "a.txt")))
+        self.assertIn("丢弃", r.stdout)
+
+    def test_preview_apply_writes_and_deletes(self):
+        if not self.userns_ok():
+            self.skipTest("内核不允许无特权用户命名空间")
+        keep = os.path.join(self.work, "keep.txt")
+        with open(keep, "w", encoding="utf-8") as f:
+            f.write("old\n")
+        gone = os.path.join(self.work, "gone.txt")
+        with open(gone, "w", encoding="utf-8") as f:
+            f.write("x\n")
+        r = self.run_dojo("preview", "--yes", "--apply",
+                          "echo new > a.txt; rm -f gone.txt; mkdir -p d1/d2")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(readfile(os.path.join(self.work, "a.txt")), "new\n")
+        self.assertFalse(os.path.exists(gone))
+        self.assertTrue(os.path.isdir(os.path.join(self.work, "d1", "d2")))
+        # 没动过的文件不能被碰
+        with open(os.path.join(self.work, "untouched.txt"), "w", encoding="utf-8") as f:
+            f.write("stay\n")
+        r2 = self.run_dojo("preview", "--yes", "--apply", "echo z > b.txt")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertEqual(readfile(os.path.join(self.work, "untouched.txt")), "stay\n")
+
+
+class TestHookStderrPTY(unittest.TestCase):
+    """shell hook 的 stderr 捕获不能把 isatty(2) 弄丢"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-hook-")
+        os.makedirs(os.path.join(self.home, ".config", "dojo"))
+        with open(os.path.join(self.home, ".config", "dojo", "config.toml"), "w", encoding="utf-8") as f:
+            f.write("[context]\ncapture_stderr = true\n")
+        share = os.path.join(self.home, ".local", "share", "dojo")
+        os.makedirs(share)
+        shutil.copy(os.path.join(ROOT, "lib", "hook.bash"), os.path.join(share, "hook.bash"))
+        with open(os.path.join(self.home, ".bashrc"), "w", encoding="utf-8") as f:
+            f.write("source ~/.local/share/dojo/hook.bash\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_isatty2_and_capture(self):
+        import pty
+        import select
+        import time
+
+        master, slave = pty.openpty()
+        env = dict(os.environ, HOME=self.home, PS1="P> ", TERM="xterm-256color")
+        proc = subprocess.Popen(["/bin/bash", "--noprofile", "-i"], stdin=slave, stdout=slave,
+                                stderr=slave, env=env, preexec_fn=os.setsid)
+        os.close(slave)
+        buf = b""
+        try:
+            time.sleep(1.0)
+            os.write(master, b"echo HOOK_MARK >&2; [ -t 2 ] && echo IS_TTY2 || echo NOT_TTY2\n")
+            end = time.time() + 8
+            while time.time() < end:
+                ready, _, _ = select.select([master], [], [], 0.2)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
+                if b"NOT_TTY2" in buf or b"IS_TTY2" in buf:
+                    break
+            os.write(master, b"exit\n")
+        finally:
+            try:
+                proc.terminate()
+            except OSError:
+                pass
+        out = buf.decode("utf-8", "replace")
+        self.assertIn("IS_TTY2", out)
+        self.assertNotIn("NOT_TTY2", out)
+        log = os.path.join(self.home, ".local", "state", "dojo", "stderr.log")
+        end = time.time() + 3
+        while time.time() < end and not (os.path.exists(log) and "HOOK_MARK" in readfile(log)):
+            time.sleep(0.1)
+        self.assertIn("HOOK_MARK", readfile(log))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

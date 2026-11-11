@@ -41,8 +41,68 @@ __dojo_hook() {
 
 if [ -f "$HOME/.config/dojo/config.toml" ] \
    && grep -A8 '^\[context\]' "$HOME/.config/dojo/config.toml" 2>/dev/null | grep -q 'capture_stderr *= *true'; then
-  : >> "$DOJO_ERR"
-  exec 2> >(tee -a "$DOJO_ERR" >&2)
+  if [ -f "$DOJO_ERR" ] && [ "$(stat -c %s "$DOJO_ERR" 2>/dev/null || echo 0)" -gt 524288 ]; then
+    tail -c 262144 "$DOJO_ERR" > "$DOJO_ERR.tmp" 2>/dev/null && mv "$DOJO_ERR.tmp" "$DOJO_ERR"
+  fi
+  __dojo_slave=$(python3 - "$DOJO_ERR" <<'PY' 2>/dev/null
+import fcntl, os, pty, sys, termios
+
+log = sys.argv[1]
+os.makedirs(os.path.dirname(log), exist_ok=True)
+master, slave = pty.openpty()
+try:
+    fd = os.open("/dev/tty", os.O_RDONLY)
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+    finally:
+        os.close(fd)
+except OSError:
+    pass
+path = os.ttyname(slave)
+if os.fork() == 0:
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    if os.fork() > 0:
+        os._exit(0)
+    import threading
+    # 别攥着命令替换的管道，不然 $(...) 永远等不到 EOF
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    os.close(devnull)
+    # 先替 shell 攥着 slave，2 秒后放开；否则 /dev/pts/N 在 exec 2> 之前就消失了
+    threading.Timer(2.0, lambda: os.close(slave)).start()
+    try:
+        tty = os.open("/dev/tty", os.O_WRONLY)
+    except OSError:
+        tty = None
+    lf = open(log, "ab", buffering=0)
+    while True:
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        try:
+            lf.write(data)
+        except OSError:
+            pass
+        if tty is not None:
+            try:
+                os.write(tty, data)
+            except OSError:
+                tty = None
+    os._exit(0)
+print(path)
+PY
+)
+  if [ -n "$__dojo_slave" ] && [ -e "$__dojo_slave" ]; then
+    exec 2>"$__dojo_slave"
+  fi
+  unset __dojo_slave
 fi
 
 autoload -Uz add-zsh-hook 2>/dev/null

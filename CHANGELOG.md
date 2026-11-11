@@ -1,5 +1,17 @@
 # 更新记录
 
+## 0.5.0
+
+Gemini 那份 roadmap 里剩下的两条，加上一个一直在拖的坑。
+
+- **新增 `dojo preview`**：用 unshare + overlayfs 把当前目录套一层隔离层，命令在里面跑，跑完列出 新增/修改/删除，再决定应用还是丢弃。猜不到会碰什么的脚本、`git clean`、`make clean` 终于有安全预演了
+  - `--apply` / `--discard` 跳过询问；没有交互终端时默认丢弃
+  - 内核不支持用户命名空间时给明确提示，回落到 `dojo exec` + 快照
+- **代跑输出进 PTY**：`dojo run` / `dojo exec` 的子进程改走 PTY，颜色和 `isatty` 保住，同时把输出写进该次运行的 `output.log`（512KB 轮转），`dojo log` 会带出最近一次输出的尾部
+- **修 capture_stderr 破坏 isatty(2)**：shell hook 不再用 `exec 2> >(tee ...)`，改成 python 开一对 PTY 转发，彩色工具不再退化，日志照留
+- 刹车时用后台线程继续泵 PTY，子进程不会因为输出写满而僵住
+- 测试从 43 项加到 47 项：PTY 捕获、沙盒丢弃、沙盒应用、hook isatty
+
 ## 0.4.1
 
 - 修 bash hook 在 `HISTCONTROL=ignoreboth` 下漏记连续相同命令的问题，改用 DEBUG trap 判断「真的执行了」

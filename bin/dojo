@@ -11,6 +11,7 @@
   dojo explain             解释上一条命令
   dojo do "想做的事"        让它给方案；L5 下逐步确认执行
   dojo run "命令"           直接跑一条（仍然要确认）
+  dojo preview "命令"       在 overlayfs 沙盒里先跑，看完再决定应用或丢弃
   dojo undo [ID] [N|all]   回滚最近一次或指定运行
   dojo history [N]         看运行记录
   dojo stop [--abort]      给正在跑的任务发停止或中断请求
@@ -28,18 +29,20 @@ import itertools
 import json
 import os
 import re
+import select
 import shlex
 import shutil
 import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.4.1"
+VERSION = "0.5.0"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -77,7 +80,13 @@ DEFAULTS = {
     },
     "assist": {"level": 3},
     "context": {"history": 8, "capture_stderr": False},
-    "exec": {"max_snapshot_mb": 200, "ttl_days": 7, "max_step_seconds": 600},
+    "exec": {
+        "max_snapshot_mb": 200,
+        "ttl_days": 7,
+        "max_step_seconds": 600,
+        "capture_output": True,
+        "output_max_kb": 512,
+    },
     "stop": {"ask": True, "timeout_seconds": 15},
     "safety": {
         "redact_secrets": True,
@@ -327,7 +336,7 @@ def last_stderr(rows, redact=True):
             f.seek(start)
             data = f.read(max(0, end_off - start))
         txt = data.decode("utf-8", "replace")
-        txt = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", txt)
+        txt = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", txt)
         lines = [l for l in txt.splitlines() if l.strip()]
         out = "\n".join(lines[-20:])
         return redact_sensitive(out, enabled=redact)
@@ -1144,6 +1153,17 @@ def cleanup_old_runs(cfg):
                 shutil.rmtree(full, ignore_errors=True)
         except OSError:
             pass
+    # 沙盒预演被打断会留下 upper 层，隔一天清掉，别当垃圾堆
+    sb_root = os.path.join(STATE_DIR, "sandbox")
+    if os.path.isdir(sb_root):
+        cutoff = time.time() - 86400
+        for d in os.listdir(sb_root):
+            full = os.path.join(sb_root, d)
+            try:
+                if os.path.isdir(full) and os.path.getmtime(full) < cutoff:
+                    shutil.rmtree(full, ignore_errors=True)
+            except OSError:
+                pass
 
 
 def _list_sorted_runs():
@@ -1271,9 +1291,154 @@ class Runner:
         env.pop("ENV", None)
         return env
 
-    def _run_one(self, cmd, run_id=None):
-        bash_bin = "/bin/bash" if os.path.exists("/bin/bash") else "sh"
-        argv = [bash_bin, "--noprofile", "--norc", "-c", cmd] if bash_bin.endswith("bash") else [bash_bin, "-c", cmd]
+    def _output_log(self, run_id):
+        """打开这次运行的输出日志（512KB 轮转），拿不到就返回 None。"""
+        _refresh_paths()
+        if run_id:
+            path = os.path.join(RUNS_DIR, run_id, "output.log")
+        else:
+            path = os.path.join(STATE_DIR, "output.log")
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            limit = max(64, int(self.cfg.get("exec", {}).get("output_max_kb", 512))) * 1024
+            if os.path.exists(path) and os.path.getsize(path) > limit:
+                with open(path, "rb") as f:
+                    f.seek(-limit // 2, os.SEEK_END)
+                    tail = f.read()
+                with open(path, "wb") as f:
+                    f.write(tail)
+            elif not os.path.exists(path):
+                open(path, "ab").close()
+                os.chmod(path, 0o600)
+            return open(path, "ab", buffering=0)
+        except OSError:
+            return None
+
+    @staticmethod
+    def _emit(data, log):
+        out = getattr(sys.stdout, "buffer", None)
+        try:
+            if out is not None:
+                out.write(data)
+                out.flush()
+            else:
+                sys.stdout.write(data.decode("utf-8", "replace"))
+                sys.stdout.flush()
+        except (OSError, ValueError):
+            pass
+        if log is not None:
+            try:
+                log.write(data)
+            except OSError:
+                pass
+
+    def _pump_once(self, master, log, wait):
+        """从 PTY 主端读一块并转发出去。返回 False 表示已经读不完/关闭。"""
+        try:
+            ready, _, _ = select.select([master], [], [], wait)
+        except (OSError, ValueError):
+            return False
+        if not ready:
+            return True
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            return False
+        if not data:
+            return False
+        self._emit(data, log)
+        return True
+
+    def _pump_loop(self, master, log, stop):
+        while not stop.is_set():
+            if not self._pump_once(master, log, 0.05):
+                return
+
+    def _drain(self, master, log):
+        for _ in range(200):
+            if not self._pump_once(master, log, 0):
+                return
+
+    def _run_pty(self, argv, run_id):
+        """在 PTY 里跑命令：输出保留颜色、isatty 仍为真，同时落一份日志。"""
+        try:
+            import fcntl
+            import pty
+            import termios
+        except ImportError:
+            return None
+        try:
+            master, slave = pty.openpty()
+        except OSError:
+            return None
+        try:
+            if sys.stdout is not None:
+                try:
+                    if sys.stdout.isatty():
+                        ws = fcntl.ioctl(sys.stdout.fileno(), termios.TIOCGWINSZ, b"\0" * 8)
+                        fcntl.ioctl(slave, termios.TIOCSWINSZ, ws)
+                except (OSError, ValueError):
+                    pass
+            proc = subprocess.Popen(
+                argv,
+                cwd=self.cwd,
+                env=self._clean_child_env(),
+                stdin=None,
+                stdout=slave,
+                stderr=slave,
+                start_new_session=True,
+            )
+        except OSError:
+            for fd in (master, slave):
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            return None
+        os.close(slave)
+        log = self._output_log(run_id)
+        self._active_write(run_id=run_id, child_pid=proc.pid)
+        old = signal.signal(signal.SIGINT, self._on_int)
+        step_timeout = int(self.cfg.get("exec", {}).get("max_step_seconds", 600))
+        deadline = time.time() + step_timeout if step_timeout > 0 else None
+        try:
+            while True:
+                rc = proc.poll()
+                if rc is not None:
+                    self._drain(master, log)
+                    return rc, False
+                if deadline and time.time() > deadline:
+                    print(f"\n[超时] 单步执行超过 {step_timeout} 秒，自动中断并回滚。")
+                    kill_group(proc)
+                    self._drain(master, log)
+                    if self.current_snapshot and self.current_kind == "reversible":
+                        for line in self.current_snapshot.restore():
+                            print("  " + line)
+                    return proc.returncode or 124, True
+                self._pump_once(master, log, 0.05)
+        except Brake:
+            stop = threading.Event()
+            relay = threading.Thread(target=self._pump_loop, args=(master, log, stop), daemon=True)
+            relay.start()
+            try:
+                return self._brake(proc)
+            finally:
+                stop.set()
+                relay.join(timeout=1.0)
+                self._drain(master, log)
+        finally:
+            signal.signal(signal.SIGINT, old)
+            try:
+                os.close(master)
+            except OSError:
+                pass
+            if log is not None:
+                try:
+                    log.close()
+                except OSError:
+                    pass
+
+    def _run_plain(self, argv, run_id):
         proc = subprocess.Popen(
             argv,
             cwd=self.cwd,
@@ -1301,6 +1466,16 @@ class Runner:
             return self._brake(proc)
         finally:
             signal.signal(signal.SIGINT, old)
+
+    def _run_one(self, cmd, run_id=None):
+        bash_bin = "/bin/bash" if os.path.exists("/bin/bash") else "sh"
+        argv = [bash_bin, "--noprofile", "--norc", "-c", cmd] if bash_bin.endswith("bash") else [bash_bin, "-c", cmd]
+        capture = bool(self.cfg.get("exec", {}).get("capture_output", True))
+        if capture and os.name == "posix":
+            got = self._run_pty(argv, run_id)
+            if got is not None:
+                return got
+        return self._run_plain(argv, run_id)
 
     def _on_int(self, signum, frame):
         raise Brake()
@@ -1483,6 +1658,195 @@ class Runner:
             print(f"\n这次运行记在 {run.dir}")
             print("要撤：dojo undo（上一步）/ dojo undo all（整个任务）")
         return 0
+
+
+# ---------------------------------------------------------------- 沙盒预演
+
+PREVIEW_PROMPT = "  1) 应用改动  2) 丢弃（默认）  > "
+
+
+def sandbox_available():
+    """检查内核是否允许无特权用户命名空间（overlayfs 预演的前提）。"""
+    exe = shutil.which("unshare")
+    if not exe:
+        return False, "没找到 unshare（util-linux 没装）"
+    try:
+        r = subprocess.run(
+            [exe, "-Urm", "--propagation", "private", "true"],
+            capture_output=True, timeout=10,
+        )
+    except Exception as e:  # noqa: BLE001 各种环境差异都有可能
+        return False, f"unshare 跑不起来：{e}"
+    if r.returncode != 0:
+        msg = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()
+        return False, msg[-1] if msg else "内核不允许用户命名空间"
+    return True, ""
+
+
+def _preview_diff(upper, lower):
+    """对比 overlay 的 upper 层，得出「新增 / 修改 / 删除 / 目录」清单。"""
+    items = []
+
+    def rec(base, rel):
+        try:
+            entries = sorted(os.scandir(base), key=lambda e: e.name)
+        except OSError:
+            return
+        for e in entries:
+            r = os.path.join(rel, e.name) if rel else e.name
+            try:
+                st = e.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.S_ISCHR(st.st_mode) and st.st_rdev == 0:
+                items.append(("删除", r))
+            elif e.is_dir(follow_symlinks=False):
+                items.append(("目录", r))
+                rec(e.path, r)
+            else:
+                items.append(("新增" if not os.path.lexists(os.path.join(lower, r)) else "修改", r))
+
+    rec(upper, "")
+    return items
+
+
+def _apply_upper(upper, root):
+    """把 upper 层的改动合回真实目录；不碰没改的文件。"""
+    items = _preview_diff(upper, root)
+    moved = 0
+    depth = lambda p: p.count(os.sep)  # noqa: E731
+    for kind, rel in sorted([i for i in items if i[0] == "删除"], key=lambda x: depth(x[1]), reverse=True):
+        target = os.path.join(root, rel)
+        if os.path.isdir(target) and not os.path.islink(target):
+            shutil.rmtree(target, ignore_errors=True)
+        elif os.path.lexists(target):
+            os.unlink(target)
+        moved += 1
+    for kind, rel in sorted([i for i in items if i[0] == "目录"], key=lambda x: depth(x[1])):
+        src = os.path.join(upper, rel)
+        target = os.path.join(root, rel)
+        os.makedirs(target, exist_ok=True)
+        try:
+            shutil.copystat(src, target, follow_symlinks=False)
+        except OSError:
+            pass
+        moved += 1
+    for kind, rel in [i for i in items if i[0] in ("新增", "修改")]:
+        src = os.path.join(upper, rel)
+        target = os.path.join(root, rel)
+        os.makedirs(os.path.dirname(target) or root, exist_ok=True)
+        if os.path.islink(src):
+            if os.path.lexists(target):
+                os.unlink(target)
+            os.symlink(os.readlink(src), target)
+        else:
+            if os.path.isdir(target) and not os.path.islink(target):
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.copy2(src, target, follow_symlinks=False)
+        moved += 1
+    return moved
+
+
+def cmd_preview(cfg, args, level, yes=False, apply=True):
+    """dojo preview：在 overlayfs 沙盒里跑命令，先看效果，再决定应用还是丢掉。"""
+    rest = [a for a in args if a not in ("--yes", "--apply", "--discard")]
+    cmd = " ".join(rest).strip()
+    if not cmd:
+        eprint('用法：dojo preview "命令" [--apply|--discard]')
+        return 1
+    if level < 5:
+        eprint(f"当前 L{level}，只有 L5 才能代跑。先 dojo level 5")
+        return 1
+    if not sys.stdin.isatty() and not yes:
+        eprint("没有交互终端，不执行。加 --yes 可以跳过确认（不建议）。")
+        return 1
+
+    ok, why = sandbox_available()
+    if not ok:
+        eprint(f"这台机器开不了沙盒：{why}")
+        eprint("用 dojo exec 跑吧，跑前会做快照，出错能 undo")
+        return 1
+
+    allowed, risk, reason = check_policy(cmd, cfg, cwd=os.getcwd())
+    if not allowed:
+        eprint(f"安全拦截：{reason}")
+        return 2
+    if risk == "high":
+        print(f"  [高风险提醒] {reason}")
+
+    root = os.getcwd()
+    cleanup_old_runs(cfg)
+    sid = time.strftime("%Y%m%d-%H%M%S") + f"-{os.getpid()}"
+    base = os.path.join(STATE_DIR, "sandbox", sid)
+    upper, work, merged = (os.path.join(base, x) for x in ("upper", "work", "merged"))
+    for d in (upper, work, merged):
+        os.makedirs(d, exist_ok=True)
+
+    env = dict(os.environ)
+    env.update({
+        "DOJO_SB_LOWER": root,
+        "DOJO_SB_UPPER": upper,
+        "DOJO_SB_WORK": work,
+        "DOJO_SB_MERGED": merged,
+        "DOJO_SB_CMD": cmd,
+        "BASH_ENV": "",
+        "ENV": "",
+    })
+    script = (
+        "set -e\n"
+        'mount -t overlay overlay -o "lowerdir=$DOJO_SB_LOWER,upperdir=$DOJO_SB_UPPER,workdir=$DOJO_SB_WORK" "$DOJO_SB_MERGED"\n'
+        'cd "$DOJO_SB_MERGED"\n'
+        'exec bash --noprofile --norc -c "$DOJO_SB_CMD"\n'
+    )
+    print(f"[沙盒] 只在 {root} 这一层隔离，~ / /tmp / /etc 下面照旧是真写")
+    print(f"       {cmd}\n")
+    try:
+        run = subprocess.run(
+            ["unshare", "-Urm", "--propagation", "private", "bash", "--noprofile", "--norc", "-c", script],
+            env=env, cwd=root,
+        )
+        rc = run.returncode
+    except Exception as e:  # noqa: BLE001
+        eprint(f"沙盒没跑起来：{e}")
+        shutil.rmtree(base, ignore_errors=True)
+        return 1
+
+    items = _preview_diff(upper, root)
+    if not items:
+        print("\n沙盒里没动任何文件。")
+        shutil.rmtree(base, ignore_errors=True)
+        return 0 if rc == 0 else rc
+
+    print(f"\n沙盒里的改动（{len(items)} 项）：")
+    for kind, rel in items[:20]:
+        print(f"  {kind}  {rel}")
+    if len(items) > 20:
+        print(f"  …… 还有 {len(items) - 20} 项")
+
+    choice = "2"
+    if not sys.stdin.isatty():
+        if apply:
+            choice = "1"
+        else:
+            print("\n没有交互终端，默认丢弃。下次加 --apply 直接应用")
+    else:
+        try:
+            ans = input(PREVIEW_PROMPT).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            ans = ""
+        if ans in ("1", "a", "y", "apply"):
+            choice = "1"
+
+    if choice == "1":
+        moved = _apply_upper(upper, root)
+        print(f"\n已应用到 {root}（{moved} 项）")
+    else:
+        print("\n已丢弃，真实文件一个没动")
+    shutil.rmtree(base, ignore_errors=True)
+    do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
+    append_ctx(rc, root, "preview: " + cmd, redact=do_redact)
+    return 0 if rc == 0 else rc
 
 
 # ---------------------------------------------------------------- 计划
@@ -1749,6 +2113,9 @@ def cmd_status(cfg):
     print(f"记录      {CTX_PATH}")
     print(f"模型      {cfg['model']['model']} @ {cfg['model']['base_url']}")
     print(f"stderr    {'开' if cfg['context'].get('capture_stderr') else '关'}")
+    print(f"输出捕获  {'开' if cfg['exec'].get('capture_output', True) else '关'}")
+    sb_ok, sb_why = sandbox_available()
+    print(f"沙盒      {'可用（overlayfs）' if sb_ok else '不可用：' + sb_why}")
     active = _active_run()
     if active:
         print(f"当前运行  PID {active.get('pid')} 正在执行 ({active.get('run') or '准备中'})")
@@ -1777,6 +2144,29 @@ def cmd_log(cfg):
     if err:
         print("--- 上一条 stderr ---")
         print(err)
+    tail = last_run_output_tail(20)
+    if tail:
+        print("--- 上次代跑的输出（尾部） ---")
+        print(redact_sensitive(tail, enabled=do_redact))
+
+
+def last_run_output_tail(lines=20):
+    """读最近一次代跑的 output.log 尾部，看不到就返回空串。"""
+    rid = latest_run()
+    if not rid:
+        return ""
+    path = os.path.join(RUNS_DIR, rid, "output.log")
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            f.seek(max(0, size - 16384))
+            text = f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+    text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text).replace("\r\n", "\n")
+    keep = [ln for ln in text.splitlines() if ln.strip()]
+    return "\n".join(keep[-lines:])
 
 
 def cmd_undo(cfg, args):
@@ -2201,6 +2591,7 @@ def usage():
         "  dojo explain             解释上一条命令\n"
         "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
+        "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
         "  dojo undo [ID] [N|all]   回滚最近或指定的运行\n"
         "  dojo history [N]         看运行记录\n"
         "  dojo commands [N]        看代跑过的命令（统一日志）\n"
@@ -2240,6 +2631,12 @@ def main():
         cmd_do(cfg, args[1:], level, yes="--yes" in args)
     elif cmd in ("exec", "sh"):
         cmd_run(cfg, args[1:], level, yes="--yes" in args)
+    elif cmd in ("preview", "try"):
+        cmd_preview(
+            cfg, args[1:], level,
+            yes="--yes" in args,
+            apply=("--apply" in args) and ("--discard" not in args),
+        )
     elif cmd == "undo":
         cmd_undo(cfg, args[1:])
     elif cmd in ("history", "runs"):

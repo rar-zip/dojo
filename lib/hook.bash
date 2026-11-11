@@ -56,16 +56,74 @@ __dojo_hook() {
   return $code
 }
 
-# 可选：整条 shell 的 stderr 落一份，dojo 才能看到具体报错
-# 代价：stderr 不再是 tty，少数程序判断 isatty(2) 的行为会变
+# 可选：把这条 shell 的 stderr 落一份日志，dojo 才能看到具体报错
+# 用 python 开一对 PTY，把 slave 接到 fd 2：写出去的仍是终端（有颜色、isatty(2) 为真），
+# 另一头由后台进程转发到真实 tty 并记进 stderr.log
 if [ -f "$HOME/.config/dojo/config.toml" ] \
    && grep -A8 '^\[context\]' "$HOME/.config/dojo/config.toml" 2>/dev/null | grep -q 'capture_stderr *= *true'; then
   # 太大就截断，别让日志无限长
   if [ -f "$DOJO_ERR" ] && [ "$(stat -c %s "$DOJO_ERR" 2>/dev/null || echo 0)" -gt 524288 ]; then
     tail -c 262144 "$DOJO_ERR" > "$DOJO_ERR.tmp" 2>/dev/null && mv "$DOJO_ERR.tmp" "$DOJO_ERR"
   fi
-  : >> "$DOJO_ERR"
-  exec 2> >(tee -a "$DOJO_ERR" >&2)
+  __dojo_slave=$(python3 - "$DOJO_ERR" <<'PY' 2>/dev/null
+import fcntl, os, pty, sys, termios
+
+log = sys.argv[1]
+os.makedirs(os.path.dirname(log), exist_ok=True)
+master, slave = pty.openpty()
+try:
+    fd = os.open("/dev/tty", os.O_RDONLY)
+    try:
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, fcntl.ioctl(fd, termios.TIOCGWINSZ, b"\0" * 8))
+    finally:
+        os.close(fd)
+except OSError:
+    pass
+path = os.ttyname(slave)
+if os.fork() == 0:
+    try:
+        os.setsid()
+    except OSError:
+        pass
+    if os.fork() > 0:
+        os._exit(0)
+    import threading
+    # 别攥着命令替换的管道，不然 $(...) 永远等不到 EOF
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+    os.close(devnull)
+    # 先替 shell 攥着 slave，2 秒后放开；否则 /dev/pts/N 在 exec 2> 之前就消失了
+    threading.Timer(2.0, lambda: os.close(slave)).start()
+    try:
+        tty = os.open("/dev/tty", os.O_WRONLY)
+    except OSError:
+        tty = None
+    lf = open(log, "ab", buffering=0)
+    while True:
+        try:
+            data = os.read(master, 65536)
+        except OSError:
+            break
+        if not data:
+            break
+        try:
+            lf.write(data)
+        except OSError:
+            pass
+        if tty is not None:
+            try:
+                os.write(tty, data)
+            except OSError:
+                tty = None
+    os._exit(0)
+print(path)
+PY
+)
+  if [ -n "$__dojo_slave" ] && [ -e "$__dojo_slave" ]; then
+    exec 2>"$__dojo_slave"
+  fi
+  unset __dojo_slave
 fi
 
 if declare -p PROMPT_COMMAND 2>/dev/null | grep -q 'declare -a'; then
