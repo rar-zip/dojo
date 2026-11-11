@@ -2536,8 +2536,17 @@ def cmd_init():
     if os.path.exists(rc):
         with open(rc, encoding="utf-8", errors="replace") as f:
             text = f.read()
-    if "# >>> dojo >>>" in text:
-        print(f"hook 已经在 {rc} 里了")
+    found = re.search(r"\n?# >>> dojo >>>\n.*?# <<< dojo <<<\n?", text, re.S)
+    if found:
+        old_block = found.group(0).strip()
+        if old_block == block.strip():
+            print(f"hook 已经在 {rc} 里了")
+        else:
+            # 仓库搬家、老安装器写死路径这类情况：直接换成当前这份
+            text = text[:found.start()] + block.lstrip("\n") + text[found.end():]
+            with open(rc, "w", encoding="utf-8") as f:
+                f.write(text)
+            print(f"hook 路径变了，已更新 {rc}：{hook}")
     else:
         with open(rc, "a", encoding="utf-8") as f:
             f.write(block)
