@@ -719,5 +719,71 @@ class TestDoLoop(unittest.TestCase):
         self.assertFalse(m.plan_is_recon_only([]))
 
 
+
+class TestSudoEscalation(unittest.TestCase):
+    """缺 root 权限时应该问一句，而不是直接失败"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-sudo-")
+        self.state = os.path.join(self.home, "state")
+        os.makedirs(self.state)
+        self.env_backup = {k: os.environ.get(k) for k in ("DOJO_STATE_DIR", "DOJO_CONFIG")}
+        os.environ["DOJO_STATE_DIR"] = self.state
+        os.environ["DOJO_CONFIG"] = os.path.join(self.home, "config.toml")
+        self.m = load_module()
+        self.m._refresh_paths()
+
+    def tearDown(self):
+        for k, v in self.env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_needs_root(self):
+        m = self.m
+        self.assertTrue(m._needs_root("apt install -y fcitx5"))
+        self.assertTrue(m._needs_root("sudo systemctl restart nginx"))
+        self.assertFalse(m._needs_root("ls -l"))
+        self.assertTrue(m._sudo_wrap("a && b").startswith("sudo -- bash"))
+
+    def test_offers_sudo_after_permission_error(self):
+        import copy
+        import types
+        from unittest import mock
+
+        m = self.m
+        cfg = copy.deepcopy(m.DEFAULTS)
+        calls = []
+
+        def fake_run_one(self, cmd, run_id=None):
+            calls.append(cmd)
+            if len(calls) == 1:
+                # 把「缺权限」写进这次运行的输出，让检测逻辑能读到
+                path = os.path.join(m.RUNS_DIR, run_id, "output.log")
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "a", encoding="utf-8") as f:
+                    f.write("mkdir: cannot create directory '/root/x': Permission denied\n")
+                return 1, False
+            return 0, False
+
+        fake_stdin = types.SimpleNamespace(isatty=lambda: True)
+        answers = iter(["y", "y"])  # 先确认要跑，再同意提权
+        with mock.patch.object(m.Runner, "_run_one", fake_run_one), \
+             mock.patch.object(m.sys, "stdin", fake_stdin), \
+             mock.patch("builtins.input", side_effect=lambda *a, **k: next(answers)), \
+             mock.patch.object(m.os, "geteuid", return_value=1000):
+            runner = m.Runner(cfg, yes=False)
+            runner._execute(["mkdir /root/x"], None)
+            run = runner.last_run
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0] == "mkdir /root/x")
+        self.assertTrue(calls[1].startswith("sudo -- bash"))
+        step = run.data["steps"][-1]
+        self.assertTrue(step.get("escalated"))
+        self.assertEqual(step["kind"], "irreversible")
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

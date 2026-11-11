@@ -1,5 +1,14 @@
 # 更新记录
 
+## 0.5.4
+
+- **缺 root 权限时会申请提权**：
+  - 方案里有 `apt` / `systemctl` / `useradd` 这类命令却没加 sudo，跑之前先问「要我加上 sudo 吗」
+  - 跑挂了且输出里有 `Permission denied` / `are you root` 这类，再问「要我加 sudo 重跑这一步吗」
+  - 提权按系统级操作处理，明说撤不回来；`exec.offer_sudo = false` 可以关掉
+- 复合命令用 `sudo -- bash -c` 整条包起来，不会只提权前半段
+- 测试 49 → 51
+
 ## 0.5.3
 
 真正的原因找到了：deepseek-flash 是推理模型，900 tokens 的预算大半烧在思考上，`finish_reason=length`，正文只吐了半截就断，所以「方案只做了一半」不只是提示词的问题。

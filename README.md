@@ -154,6 +154,18 @@ dojo preview --discard "..."                  # 不问，直接丢
 
 `dojo undo` 默认撤最近一步，`dojo undo all` 撤最近一次运行的全部步骤。
 
+## 缺 root 权限怎么办
+
+装包、改系统配置这类活，普通用户跑必然 `Permission denied`。dojo 不会假装没看见，也不会自作主张提权：
+
+- 预案里出现 `apt` / `systemctl` / `useradd` 这类需要 root 的命令，而你还没加 sudo，跑之前先问一句「要我加上 sudo 吗」
+- 如果命令跑挂了，输出里出现 `Permission denied` / `are you root` 这类，会再问「要我加 sudo 重跑这一步吗」
+- 默认都是拒绝（只有提前那句是 Y），你说 y 才动
+
+提权这一步会按系统级操作处理：做不了可靠快照，`undo` 撤不回来，跑之前会明说。
+
+不想被问就 `dojo config set exec.offer_sudo false`。
+
 ## 安全红线
 
 有些东西它不替你碰，也不替你撤：

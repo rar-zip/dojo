@@ -42,7 +42,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.3"
+VERSION = "0.5.4"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -86,6 +86,7 @@ DEFAULTS = {
         "max_step_seconds": 600,
         "capture_output": True,
         "output_max_kb": 512,
+        "offer_sudo": True,
     },
     "stop": {"ask": True, "timeout_seconds": 15},
     "safety": {
@@ -130,6 +131,38 @@ IRREVERSIBLE = {
     "useradd", "userdel", "usermod", "groupadd", "groupdel", "passwd", "chpasswd",
     "crontab", "at", "modprobe", "insmod", "rmmod", "sysctl",
 }
+
+# 需要 root 才能干的命令：没加 sudo 时先问一句，省得跑一半报 Permission denied
+PRIVILEGED_CMDS = {
+    "apt", "apt-get", "dnf", "yum", "pacman", "zypper", "snap",
+    "systemctl", "service", "useradd", "usermod", "userdel", "groupadd",
+    "ufw", "iptables", "nft", "firewall-cmd", "mount", "umount",
+    "swapon", "swapoff", "hostnamectl", "timedatectl", "journalctl",
+}
+
+PERM_ERROR_RE = re.compile(
+    r"permission denied|operation not permitted|are you root|must be root|"
+    r"you need to be root|read-only file system|eacces|not permitted",
+    re.I,
+)
+
+
+def _sudo_wrap(cmd):
+    """把整条命令包进一次 sudo bash -c，复合命令也能一起提权。"""
+    return "sudo -- bash --noprofile --norc -c " + shlex.quote(cmd)
+
+
+def _needs_root(cmd):
+    for seg in iter_segments(cmd):
+        try:
+            tokens = shlex.split(seg, comments=True)
+        except ValueError:
+            tokens = seg.split()
+        name, _ = _cmd_args(tokens)
+        if name in PRIVILEGED_CMDS:
+            return True
+    return False
+
 
 FILE_CMDS = {"cp", "mv", "ln", "rm", "rmdir", "tee", "touch", "mkdir", "truncate"}
 
@@ -1388,6 +1421,19 @@ class Runner:
             if not self._pump_once(master, log, 0):
                 return
 
+    def _output_since(self, run_id, offset):
+        """读这次运行在 offset 之后新写出来的输出，用来判断是不是缺权限。"""
+        path = os.path.join(RUNS_DIR, run_id, "output.log")
+        try:
+            size = os.path.getsize(path)
+            if size <= offset:
+                return ""
+            with open(path, "rb") as f:
+                f.seek(offset)
+                return f.read(min(size - offset, 65536)).decode("utf-8", "replace")
+        except OSError:
+            return ""
+
     def _run_pty(self, argv, run_id):
         """在 PTY 里跑命令：输出保留颜色、isatty 仍为真，同时落一份日志。"""
         try:
@@ -1654,6 +1700,18 @@ class Runner:
                 self._active_write(run.id)
             print(f"\n第 {i}/{len(cmds)} 步 · {cmd}\n", flush=True)
 
+            offer_sudo = bool(self.cfg.get("exec", {}).get("offer_sudo", True))
+            if (offer_sudo and not self.yes and os.geteuid() != 0
+                    and not re.match(r"^\s*sudo\b", cmd) and _needs_root(cmd)):
+                try:
+                    ans = input("  这条要 root。要我加上 sudo 跑吗？(Y/n) ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    ans = "n"
+                if ans in ("", "y", "yes"):
+                    cmd = _sudo_wrap(cmd)
+                    print(f"  改成：{cmd}")
+
             kind = classify(cmd)
             self.current_kind = kind
             snap = Snapshot(run.dir, i, cmd, self.cfg, cwd=self.cwd)
@@ -1667,9 +1725,36 @@ class Runner:
                 print("  （系统级操作，做不了可靠快照，停下后只能给反向命令）")
 
             self.current_snapshot = snap
+            out_path = os.path.join(run.dir, "output.log")
+            try:
+                out_before = os.path.getsize(out_path)
+            except OSError:
+                out_before = 0
             rc, stopped = self._run_one(cmd, run_id=run.id)
+            escalated = False
+            if (rc != 0 and not stopped and offer_sudo and os.geteuid() != 0
+                    and not re.match(r"^\s*sudo\b", cmd)
+                    and PERM_ERROR_RE.search(self._output_since(run.id, out_before))
+                    and sys.stdin.isatty()):
+                print("\n  这一步像是缺 root 权限")
+                try:
+                    ans = input("  要我加 sudo 重跑这一步吗？(y/N) ").strip().lower()
+                except (EOFError, KeyboardInterrupt):
+                    print()
+                    ans = ""
+                if ans in ("y", "yes"):
+                    esc = _sudo_wrap(cmd)
+                    print(f"  [提权] {esc}")
+                    print("  （系统级操作，快照撤不回来，自己看清楚）")
+                    kind = "irreversible"
+                    self.current_kind = kind
+                    rc, stopped = self._run_one(esc, run_id=run.id)
+                    cmd = esc
+                    escalated = True
             print(f"  退出码 {rc}")
             run.add_step(cmd, kind, snap, rc, cwd=self.cwd)
+            if escalated:
+                run.data["steps"][-1]["escalated"] = True
             log_command(run.id, i, len(cmds), cmd, rc)
             run.data["steps"][-1]["coarse"] = snap.coarse
             run.data["steps"][-1]["unsupported"] = snap.unsupported
