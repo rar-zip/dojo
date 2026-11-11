@@ -849,6 +849,67 @@ class TestAutoExplain(unittest.TestCase):
         self.assertIn("这命令压根不存在", out)
         self.assertEqual(cm.call_count, 1)
 
+
+    def test_error_card_format(self):
+        import io
+        import time
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        now = int(time.time())
+        self.write_ctx([(now, "127", "/tmp", "notacommand --foo")])
+        m = self.m
+        payload = ('{"cause": "命令名拼错了，系统里没有 notacommand", '
+                   '"guess": "你想看一条命令在不在", '
+                   '"solutions": ["command -v notacommand 确认名字", "history | grep nota 翻一下"]}')
+        buf = io.StringIO()
+        with mock.patch.object(m, "call_model", return_value=payload), \
+             mock.patch.object(m.sys, "argv", ["dojo"]), \
+             redirect_stdout(buf):
+            m.main()
+        out = buf.getvalue()
+        self.assertIn("原因  命令名拼错了", out)
+        self.assertIn("猜测  你想看一条命令在不在", out)
+        self.assertIn("1. command -v notacommand", out)
+        self.assertIn('dojo why', out)
+
+    def test_error_card_falls_back_to_text(self):
+        import io
+        import time
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        now = int(time.time())
+        self.write_ctx([(now, "1", "/tmp", "cat nope")])
+        m = self.m
+        buf = io.StringIO()
+        with mock.patch.object(m, "call_model", return_value="就是文件不存在"), \
+             mock.patch.object(m.sys, "argv", ["dojo"]), \
+             redirect_stdout(buf):
+            m.main()
+        self.assertIn("就是文件不存在", buf.getvalue())
+
+    def test_why_carries_intent(self):
+        import io
+        import time
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        now = int(time.time())
+        self.write_ctx([(now, "127", "/tmp", "notacommand")])
+        m = self.m
+        seen = []
+
+        def fake(cfg_, msgs, **kw):
+            seen.append(msgs)
+            return '{"cause": "x", "guess": "y", "solutions": ["z"]}'
+
+        buf = io.StringIO()
+        with mock.patch.object(m, "call_model", fake), redirect_stdout(buf):
+            m.cmd_why(m.load_config(), ["我其实想改", "输入法配置"], 3)
+        self.assertIn("我其实想改 输入法配置", str(seen[0]))
+        self.assertIn("原因", buf.getvalue())
+
     def test_errors_list(self):
         import io
         import time

@@ -2324,8 +2324,58 @@ def last_failure(max_age=3600):
     return r
 
 
+ERROR_JSON_SPEC = (
+    "只输出一个 JSON 对象，不要代码块、不要多余的话。字段："
+    '"cause" 一句话说清楚为什么挂，先怀疑打字打错、命令不存在、参数不对这类低级问题；'
+    '"guess" 一句话猜他本来想干什么；'
+    '"solutions" 数组，2 到 3 条具体怎么办，每条一句话，能直接给命令就给命令。'
+)
+
+
+def _parse_json_loose(text):
+    if not text:
+        return None
+    m = re.search(r"\{.*\}", text, re.S)
+    if not m:
+        return None
+    try:
+        data = json.loads(m.group(0))
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _print_error_card(data, persona_name="老王"):
+    cause = str(data.get("cause") or "").strip()
+    guess = str(data.get("guess") or "").strip()
+    sols = data.get("solutions") or []
+    if isinstance(sols, str):
+        sols = [sols]
+    sols = [str(x).strip() for x in sols if str(x).strip()][:3]
+    if cause:
+        print(f"原因  {cause}")
+    if guess:
+        print(f"猜测  {guess}")
+    for i, sol in enumerate(sols, 1):
+        print(("方案  " if i == 1 else "      ") + f"{i}. {sol}")
+    if not (cause or guess or sols):
+        return False
+    return True
+
+
+def error_messages(cfg, rows, row, question, level):
+    err = last_stderr(rows, redact=True)
+    q = (
+        f"我刚敲的 `{row['cmd']}` 挂了，退出码 {row['code']}，目录 {row['cwd']}。"
+    )
+    if err:
+        q += f"\n报错输出：\n{err}\n"
+    q += "\n" + question + "\n\n" + ERROR_JSON_SPEC
+    return build_messages(cfg, rows, q, level)
+
+
 def cmd_error_answer(cfg, level, row):
-    """凭空敲 dojo 时，如果上一条挂了，直接让老王说原因，不用再敲 explain。"""
+    """空敲 dojo，上一条挂了就先给结论：为什么挂、想干什么、怎么办。"""
     do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
     persona_name = cfg.get("persona", {}).get("name", "老王")
     print(f"\n上一条命令挂了（退出码 {row['code']}）："
@@ -2338,12 +2388,53 @@ def cmd_error_answer(cfg, level, row):
     elif not cfg["context"].get("capture_stderr"):
         print("（没开 stderr 捕获，只能看退出码；"
               "想看具体报错就 dojo config set context.capture_stderr true）")
-    q = (f"我刚敲的 `{row['cmd']}` 挂了，退出码 {row['code']}，目录 {row['cwd']}。"
-         "说清楚为什么挂、先看哪里、怎么修，别复述命令。")
-    print(f"\n{persona_name}：")
-    res = call_model(cfg, build_messages(cfg, rows, q, level))
-    if not cfg["model"].get("stream", True) and res:
-        print(res)
+    print()
+    res = call_model(
+        cfg,
+        error_messages(cfg, rows, row, "按原因、猜测、方案说清楚。", level),
+        stream=False,
+        max_tokens=800,
+    )
+    data = _parse_json_loose(res)
+    if data and _print_error_card(data, persona_name):
+        pass
+    else:
+        print(f"{persona_name}：{res.strip()}")
+    print('\n都不对？dojo why "我其实想干什么"，它按你的目的重新给准确做法')
+
+
+def cmd_why(cfg, args, level):
+    """方案都不对时，用一句话说清目的，拿到精确做法。"""
+    question = " ".join(args).strip()
+    if not question:
+        try:
+            question = input("你其实想干什么：").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+    if not question:
+        return
+    rows = read_ctx(int(cfg["context"]["history"]))
+    row = rows[-1] if rows else {"cmd": "（没有记录）", "code": "?", "cwd": os.getcwd()}
+    print(f"\n按你的目的来：{question}")
+    res = call_model(
+        cfg,
+        error_messages(
+            cfg, rows, row,
+            "他说的方案都不对，他真正想做的是："
+            + question
+            + "。忽略之前那几条方案，直接按目的给准确做法，别猜偏。",
+            level,
+        ),
+        stream=False,
+        max_tokens=800,
+    )
+    data = _parse_json_loose(res)
+    if data and _print_error_card(data, cfg.get("persona", {}).get("name", "老王")):
+        pass
+    else:
+        print(f"{cfg.get('persona', {}).get('name', '老王')}：{res.strip()}")
+    print('\n还想补一句？dojo why "补充说明" 或 dojo chat 接着聊')
 
 
 def cmd_errors(cfg, args):
@@ -2862,6 +2953,7 @@ def usage():
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
         "  dojo errors [N]          列最近的失败命令\n"
+        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"
         "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
@@ -2918,6 +3010,8 @@ def main():
         cmd_undo(cfg, args[1:])
     elif cmd in ("errors", "err"):
         cmd_errors(cfg, args[1:])
+    elif cmd in ("why", "fix"):
+        cmd_why(cfg, args[1:], level)
     elif cmd in ("history", "runs"):
         cmd_history(cfg, args[1:])
     elif cmd == "commands":
