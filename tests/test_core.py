@@ -785,5 +785,85 @@ class TestSudoEscalation(unittest.TestCase):
         self.assertEqual(step["kind"], "irreversible")
 
 
+
+class TestAutoExplain(unittest.TestCase):
+    """空敲 dojo，上一条挂了就直接给原因"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-auto-")
+        conf = os.path.join(self.home, ".config", "dojo")
+        os.makedirs(conf)
+        self.conf = os.path.join(conf, "config.toml")
+        with open(self.conf, "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        self.state = os.path.join(self.home, ".local", "state", "dojo")
+        os.makedirs(self.state)
+        self.env_backup = {k: os.environ.get(k) for k in ("DOJO_CONFIG", "DOJO_STATE_DIR")}
+        os.environ["DOJO_CONFIG"] = self.conf
+        os.environ["DOJO_STATE_DIR"] = self.state
+        self.m = load_module()
+        self.m._refresh_paths()
+
+    def tearDown(self):
+        for k, v in self.env_backup.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def write_ctx(self, rows):
+        path = os.path.join(self.state, "ctx.tsv")
+        with open(path, "w", encoding="utf-8") as f:
+            for ts, code, cwd, cmd in rows:
+                f.write(f"{ts}\x1f{code}\x1f{cwd}\x1f{cmd}\x1f\n")
+
+    def test_last_failure_detection(self):
+        import time
+        now = int(time.time())
+        self.write_ctx([(now, "1", "/tmp", "ls /nope")])
+        self.assertIsNotNone(self.m.last_failure())
+        self.write_ctx([(now, "0", "/tmp", "ls /tmp")])
+        self.assertIsNone(self.m.last_failure())
+        # 太旧的失败不再主动提
+        self.write_ctx([(now - 7200, "1", "/tmp", "ls /nope")])
+        self.assertIsNone(self.m.last_failure())
+
+    def test_bare_dojo_answers_error(self):
+        import io
+        import time
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        now = int(time.time())
+        self.write_ctx([(now, "127", "/tmp", "notacommand --foo")])
+        m = self.m
+        buf = io.StringIO()
+        with mock.patch.object(m, "call_model", return_value="这命令压根不存在") as cm, \
+             mock.patch.object(m.sys, "argv", ["dojo"]), \
+             redirect_stdout(buf):
+            m.main()
+        out = buf.getvalue()
+        self.assertIn("上一条命令挂了", out)
+        self.assertIn("127", out)
+        self.assertIn("这命令压根不存在", out)
+        self.assertEqual(cm.call_count, 1)
+
+    def test_errors_list(self):
+        import io
+        import time
+        from contextlib import redirect_stdout
+
+        now = int(time.time())
+        self.write_ctx([(now, "0", "/tmp", "ls"), (now, "2", "/tmp", "grep x y"), (now, "1", "/tmp", "cat nope")])
+        buf = io.StringIO()
+        with redirect_stdout(buf):
+            self.m.cmd_errors(self.m.load_config(), ["5"])
+        out = buf.getvalue()
+        self.assertIn("grep x y", out)
+        self.assertIn("cat nope", out)
+        self.assertNotIn("ls\n", out)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

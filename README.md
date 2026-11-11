@@ -212,11 +212,15 @@ ask = true
 timeout_seconds = 15
 ```
 
+### auto_explain
+
+默认开。空敲 `dojo` 时，如果上一条命令是失败的（退出码非 0，且在一小时内），它不打印状态，直接告诉你为什么挂、先看哪里。不想被它主动搭话就 `dojo config set context.auto_explain false`。
+
 ### capture_stderr
 
-默认关。打开后 shell 启动时给 stderr 接一对 PTY：数据照旧显示在终端、`isatty(2)` 仍然是真（颜色不丢），同时留一份到 `~/.local/state/dojo/stderr.log`，`dojo explain` 就能看到真正的报错。
+默认开。shell 启动时给 stderr 接一对 PTY：数据照旧显示在终端、`isatty(2)` 仍然是真（颜色不丢），同时留一份到 `~/.local/state/dojo/stderr.log`，`dojo explain` 就能看到真正的报错。
 
-多了一个后台转发进程，退出 shell 自己会走。不喜欢就关掉。
+多了一个后台转发进程，退出 shell 自己会走。不想开就 `dojo config set context.capture_stderr false`。
 
 ### capture_output
 

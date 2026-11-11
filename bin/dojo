@@ -79,7 +79,7 @@ DEFAULTS = {
         "timeout_seconds": 90,
     },
     "assist": {"level": 3},
-    "context": {"history": 8, "capture_stderr": False},
+    "context": {"history": 8, "capture_stderr": True, "auto_explain": True},
     "exec": {
         "max_snapshot_mb": 200,
         "ttl_days": 7,
@@ -2304,6 +2304,68 @@ def cmd_explain(cfg, level):
         print(f"{persona_name}：{res}")
 
 
+def last_failure(max_age=3600):
+    """最近一条命令挂了就返回它，成功或太旧都返回 None。"""
+    rows = read_ctx(1)
+    if not rows:
+        return None
+    r = rows[-1]
+    try:
+        code = int(str(r["code"]).strip() or 0)
+    except ValueError:
+        return None
+    if code == 0:
+        return None
+    try:
+        if time.time() - int(float(r["ts"])) > max_age:
+            return None
+    except (ValueError, TypeError):
+        pass
+    return r
+
+
+def cmd_error_answer(cfg, level, row):
+    """凭空敲 dojo 时，如果上一条挂了，直接让老王说原因，不用再敲 explain。"""
+    do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
+    persona_name = cfg.get("persona", {}).get("name", "老王")
+    print(f"\n上一条命令挂了（退出码 {row['code']}）："
+          f"{redact_sensitive(row['cmd'], enabled=do_redact)}")
+    rows = read_ctx(int(cfg["context"]["history"]))
+    err = last_stderr(rows, redact=do_redact)
+    if err:
+        print("--- 报错 ---")
+        print(err)
+    elif not cfg["context"].get("capture_stderr"):
+        print("（没开 stderr 捕获，只能看退出码；"
+              "想看具体报错就 dojo config set context.capture_stderr true）")
+    q = (f"我刚敲的 `{row['cmd']}` 挂了，退出码 {row['code']}，目录 {row['cwd']}。"
+         "说清楚为什么挂、先看哪里、怎么修，别复述命令。")
+    print(f"\n{persona_name}：")
+    res = call_model(cfg, build_messages(cfg, rows, q, level))
+    if not cfg["model"].get("stream", True) and res:
+        print(res)
+
+
+def cmd_errors(cfg, args):
+    """列最近的失败命令，配合 capture_stderr 还能带出报错摘要。"""
+    limit = 10
+    if args:
+        try:
+            limit = max(1, int(args[0]))
+        except ValueError:
+            pass
+    rows = read_ctx(400)
+    fails = [r for r in rows if str(r["code"]) != "0"]
+    if not fails:
+        print("最近没有失败的命令。")
+        return
+    do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
+    for r in fails[-limit:]:
+        when = time.strftime("%m-%d %H:%M", time.localtime(int(float(r["ts"])))) if r["ts"] else "?"
+        print(f"  {when}  ×{r['code']}  {redact_sensitive(r['cmd'][:80], enabled=do_redact)}")
+    print(f"\n共 {len(fails)} 条失败。看最近一条的原因：dojo explain")
+
+
 def cmd_status(cfg):
     _refresh_paths()
     level = int(cfg["assist"]["level"])
@@ -2799,6 +2861,7 @@ def usage():
         "  dojo chat                连着聊，问不清楚可以追问\n"
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
+        "  dojo errors [N]          列最近的失败命令\n"
         "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
@@ -2825,6 +2888,10 @@ def main():
     if cmd == "":
         if not os.path.exists(CONFIG_PATH) or not resolve_key(cfg):
             quickstart(cfg)
+            return
+        failed = last_failure() if cfg.get("context", {}).get("auto_explain", True) else None
+        if failed is not None:
+            cmd_error_answer(cfg, level, failed)
         else:
             cmd_status(cfg)
     elif cmd == "status":
@@ -2849,6 +2916,8 @@ def main():
         )
     elif cmd == "undo":
         cmd_undo(cfg, args[1:])
+    elif cmd in ("errors", "err"):
+        cmd_errors(cfg, args[1:])
     elif cmd in ("history", "runs"):
         cmd_history(cfg, args[1:])
     elif cmd == "commands":

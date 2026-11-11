@@ -68,7 +68,7 @@ __KEY_PY__
     printf '%s\n' ''
     printf '%s\n' '[context]'
     printf '%s\n' 'history = 8'
-    printf '%s\n' 'capture_stderr = false'
+    printf '%s\n' 'capture_stderr = true'
     printf '%s\n' ''
     printf '%s\n' '[exec]'
     printf '%s\n' 'max_snapshot_mb = 200'
