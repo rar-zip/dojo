@@ -28,6 +28,7 @@ import hashlib
 import itertools
 import json
 import os
+import queue
 import re
 import select
 import shlex
@@ -42,7 +43,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.4"
+VERSION = "0.6.0"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -500,6 +501,47 @@ def stream_out(resp, persona_name="老王"):
             print(piece, end="", flush=True)
     print()
     return "".join(out)
+
+
+def iter_model_stream(cfg, messages, max_tokens=1600):
+    """程序化流式接口：逐块吐出正文，给 ACP 这种要实时转发的场景用。"""
+    key = resolve_key(cfg)
+    if not key:
+        raise RuntimeError("没有 API key")
+    payload = {
+        "model": cfg["model"]["model"],
+        "messages": messages,
+        "temperature": 0.7,
+        "max_tokens": max_tokens,
+        "stream": True,
+    }
+    url = cfg["model"]["base_url"].rstrip("/") + "/chat/completions"
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+    )
+    timeout = float(cfg["model"].get("timeout_seconds") or 90)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            for raw in resp:
+                line = raw.decode("utf-8", "replace").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    obj = json.loads(data)
+                    delta = (obj.get("choices") or [{}])[0].get("delta") or {}
+                    piece = delta.get("content") or ""
+                except (ValueError, KeyError, IndexError):
+                    continue
+                if piece:
+                    yield piece
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace")[:200]
+        raise RuntimeError(f"模型接口 {e.code}：{body}")
 
 
 # ---------------------------------------------------------------- 命令解析与策略引擎
@@ -2136,6 +2178,226 @@ def cmd_run(cfg, args, level, yes=False):
     return rc
 
 
+# ---------------------------------------------------------------- ACP / 编辑器接入
+
+ACP_PROTOCOL_VERSION = 1
+
+
+def _acp_send(obj):
+    sys.stdout.write(json.dumps(obj, ensure_ascii=False) + "\n")
+    sys.stdout.flush()
+
+
+def _acp_reply(mid, result):
+    _acp_send({"jsonrpc": "2.0", "id": mid, "result": result})
+
+
+def _acp_error(mid, code, message):
+    _acp_send({"jsonrpc": "2.0", "id": mid, "error": {"code": code, "message": message}})
+
+
+def _acp_update(sid, text):
+    _acp_send({
+        "jsonrpc": "2.0",
+        "method": "session/update",
+        "params": {
+            "sessionId": sid,
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": text},
+            },
+        },
+    })
+
+
+def acp_messages(cfg, sess, text, level):
+    do_redact = bool(cfg.get("safety", {}).get("redact_secrets", True))
+    persona_name = cfg.get("persona", {}).get("name", "老王")
+    persona_prompt = PERSONA.replace("老王", persona_name) if persona_name != "老王" else PERSONA
+    system = (
+        persona_prompt
+        + "\n你现在是编辑器通过 ACP 接进来的助手，不是终端里的 CLI。"
+        + "\n当前协助等级：" + LEVEL_RULES.get(level, LEVEL_RULES[3])
+        + f"\n工作目录：{sess['cwd']}"
+        + "\n你看不到终端历史，只能看到编辑器发来的内容。"
+    )
+    messages = [{"role": "system", "content": system}]
+    for turn in sess["history"][-24:]:
+        messages.append({"role": turn["role"],
+                         "content": redact_sensitive(turn["content"], enabled=do_redact)})
+    messages.append({"role": "user", "content": redact_sensitive(text, enabled=do_redact)})
+    return messages
+
+
+def _acp_run_prompt(cfg, level, sid, sess, text):
+    messages = acp_messages(cfg, sess, text, level)
+    parts = []
+    for piece in iter_model_stream(cfg, messages, max_tokens=1600):
+        if sess["cancel"].is_set():
+            break
+        parts.append(piece)
+        _acp_update(sid, piece)
+    answer = "".join(parts)
+    sess["history"].append({"role": "user", "content": text})
+    sess["history"].append({"role": "assistant", "content": answer})
+    del sess["history"][:-24]
+    return "cancelled" if sess["cancel"].is_set() else "end_turn"
+
+
+def cmd_acp(cfg, level):
+    """把 dojo 包成 ACP agent：stdio 上的 JSON-RPC，给编辑器当后端。"""
+    sessions = {}
+    events = {}
+    q = queue.Queue()
+
+    def reader():
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            if msg.get("method") == "session/cancel":
+                sid = (msg.get("params") or {}).get("sessionId")
+                if sid in events:
+                    events[sid].set()
+                continue
+            q.put(msg)
+        q.put(None)
+
+    threading.Thread(target=reader, daemon=True).start()
+
+    while True:
+        msg = q.get()
+        if msg is None:
+            break
+        mid = msg.get("id")
+        method = msg.get("method") or ""
+        params = msg.get("params") or {}
+        try:
+            if method == "initialize":
+                _acp_reply(mid, {
+                    "protocolVersion": ACP_PROTOCOL_VERSION,
+                    "agentCapabilities": {
+                        "loadSession": False,
+                        "promptCapabilities": {"image": False, "audio": False, "embeddedContext": True},
+                        "mcpCapabilities": {"http": False, "sse": False},
+                    },
+                    "agentInfo": {"name": "dojo", "version": VERSION},
+                    "authMethods": [],
+                })
+            elif method == "authenticate":
+                _acp_reply(mid, {})
+            elif method == "session/new":
+                sid = "sess_" + hashlib.sha1(
+                    f"{time.time()}-{os.getpid()}-{len(sessions)}".encode()
+                ).hexdigest()[:16]
+                events[sid] = threading.Event()
+                sessions[sid] = {
+                    "cwd": params.get("cwd") or os.getcwd(),
+                    "history": [],
+                    "cancel": events[sid],
+                }
+                _acp_reply(mid, {"sessionId": sid})
+            elif method == "session/prompt":
+                sid = params.get("sessionId")
+                sess = sessions.get(sid)
+                if not sess:
+                    _acp_error(mid, -32002, "session not found")
+                    continue
+                text = "".join(
+                    str(b.get("text") or "")
+                    for b in (params.get("prompt") or [])
+                    if isinstance(b, dict) and b.get("type") == "text"
+                )
+                sess["cancel"].clear()
+                _acp_reply(mid, {"stopReason": _acp_run_prompt(cfg, level, sid, sess, text)})
+            elif mid is not None:
+                _acp_error(mid, -32601, f"method not found: {method}")
+        except Exception as e:  # noqa: BLE001 协议层不能因为一次失败就退出
+            if mid is not None:
+                _acp_error(mid, -32603, str(e))
+
+
+# ---------------------------------------------------------------- 补全（FIM）
+
+
+def _fim_url(cfg):
+    base = cfg["model"]["base_url"].rstrip("/")
+    if base.endswith("/v1"):
+        base = base[:-3]
+    return base + "/beta/completions"
+
+
+def cmd_complete(cfg, args):
+    """dojo complete：FIM 补全，只吐补出来的那一段，方便终端/编辑器接。"""
+    prefix = suffix = None
+    max_tokens = 64
+    i = 0
+    while i < len(args):
+        a = args[i]
+        if a in ("-p", "--prefix") and i + 1 < len(args):
+            prefix = args[i + 1]
+            i += 2
+        elif a in ("-s", "--suffix") and i + 1 < len(args):
+            suffix = args[i + 1]
+            i += 2
+        elif a in ("-n", "--max") and i + 1 < len(args):
+            try:
+                max_tokens = max(1, min(256, int(args[i + 1])))
+            except ValueError:
+                pass
+            i += 2
+        elif a in ("-h", "--help"):
+            print('用法：dojo complete -p "前半段" [-s "后半段"] [-n 64]')
+            return
+        else:
+            i += 1
+    if prefix is None:
+        if sys.stdin.isatty():
+            eprint('用法：dojo complete -p "前半段" [-s "后半段"]')
+            sys.exit(1)
+        data = sys.stdin.read()
+        if "\x00" in data:
+            prefix, _, suffix = data.partition("\x00")
+        else:
+            prefix = data
+    if not prefix:
+        eprint('前缀是空的。用法：dojo complete -p "前半段" [-s "后半段"]')
+        sys.exit(1)
+    key = resolve_key(cfg)
+    if not key:
+        eprint("没有 API key")
+        sys.exit(2)
+    payload = {
+        "model": cfg["model"]["model"],
+        "prompt": prefix,
+        "suffix": suffix or "",
+        "max_tokens": max_tokens,
+        "temperature": 0,
+        "stream": False,
+    }
+    req = urllib.request.Request(
+        _fim_url(cfg),
+        data=json.dumps(payload).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Authorization": "Bearer " + key},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=float(cfg["model"].get("timeout_seconds") or 30)) as resp:
+            data = json.loads(resp.read())
+        text = data["choices"][0].get("text") or ""
+    except urllib.error.HTTPError as e:
+        eprint(f"补全接口报错 {e.code}：{e.read().decode('utf-8', 'replace')[:200]}")
+        sys.exit(3)
+    except Exception as e:  # noqa: BLE001
+        eprint(f"补全失败：{e}")
+        sys.exit(3)
+    sys.stdout.write(text)
+    sys.stdout.flush()
+
+
 # ---------------------------------------------------------------- 聊天与其他命令
 
 
@@ -2963,7 +3225,7 @@ def usage():
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
         "  dojo errors [N]          列最近的失败命令\n"
-        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"
+        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"        "  dojo acp                 以 ACP agent 方式跑（stdio），给编辑器接\n"        "  dojo complete -p \"…\"     FIM 补全，只输出补出来的那一段\n"
         "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
@@ -3022,6 +3284,10 @@ def main():
         cmd_errors(cfg, args[1:])
     elif cmd in ("why", "fix"):
         cmd_why(cfg, args[1:], level)
+    elif cmd == "acp":
+        cmd_acp(cfg, level)
+    elif cmd in ("complete", "fim"):
+        cmd_complete(cfg, args[1:])
     elif cmd in ("history", "runs"):
         cmd_history(cfg, args[1:])
     elif cmd == "commands":

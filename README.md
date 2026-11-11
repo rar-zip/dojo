@@ -60,6 +60,8 @@ dojo ask "这报错啥意思"      # 问一句就走
 dojo explain                # 解释上一条命令（带退出码和 stderr）
 dojo run "把日志里 500 的行数出来"   # 说人话，它出方案，L5 下逐步确认执行
 dojo exec "df -h"           # 直接跑一条字面命令（L5，仍要确认）
+dojo acp                    # 当 ACP agent 跑，给编辑器当后端
+dojo complete -p "grep -r TODO "   # FIM 补全，只吐补出来的那段
 dojo preview "rm -rf build"  # 沙盒里先跑一遍，看完再决定应用还是丢弃
 dojo undo                   # 撤掉最近一步
 dojo undo all               # 撤掉最近一次运行的全部步骤
@@ -165,6 +167,29 @@ dojo preview --discard "..."                  # 不问，直接丢
 提权这一步会按系统级操作处理：做不了可靠快照，`undo` 撤不回来，跑之前会明说。
 
 不想被问就 `dojo config set exec.offer_sudo false`。
+
+## 接编辑器（ACP）
+
+dojo 能把自己包成 ACP agent，编辑器通过 stdio 上的 JSON-RPC 连过来。Zed 这类支持 ACP 的客户端，配置里加一段：
+
+```json
+{
+  "agent_servers": {
+    "dojo": { "command": "dojo", "args": ["acp"] }
+  }
+}
+```
+
+实现了 `initialize`、`authenticate`、`session/new`、`session/prompt`、`session/cancel`，回答按 `session/update` 流式回包。**它只负责说话**：不接文件读写、不接终端控制，所以编辑器那边不会因为 dojo 自动改了什么。
+
+## 补全（FIM）
+
+```bash
+dojo complete -p "grep -r TODO "
+printf '%s\0%s' "前半段" "后半段" | dojo complete
+```
+
+走 DeepSeek 的 `/beta/completions`（FIM），只输出补出来的那一段，不加换行，方便 shell 的补全部件或编辑器直接吃。`-n 64` 控制长度。
 
 ## 安全红线
 

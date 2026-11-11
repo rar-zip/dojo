@@ -1,12 +1,16 @@
 # 更新记录
 
-## 未发布
+## 0.6.0
 
 - **空敲 `dojo` 直接答报错**：上一条命令失败（退出码非 0、一小时内）时，不再打印状态，直接让老王说为什么挂、先看哪里、怎么修
 - **报错回答固定格式**：原因 / 猜测 / 方案 三段，模型只允许回 JSON，渲染由 dojo 负责；方案里的每一条都是能直接执行的命令，不是文字分析，也不再标「老王」
 - **新增 `dojo why "我其实想……"`**：三条方案都不对时，用一句话说清目的，它带着刚才的报错重新给准确做法
 - **新增 `dojo errors [N]`**：列出最近失败的命令，带时间和退出码
 - **`capture_stderr` 默认改成开**：新装默认能拿到报错正文；老配置里写死了 false 的不受影响，要手动开
+- **新增 `dojo acp`**：stdio 上的 ACP agent（JSON-RPC 2.0），实现 initialize / session/new / session/prompt / session/cancel，流式回 `session/update`；不碰文件系统和终端，只负责说
+- **新增 `dojo complete`**：DeepSeek FIM（`/beta/completions`）补全，只输出补出来的那段，无换行，方便 shell/编辑器接
+- 抽出 `iter_model_stream()`，ACP 与终端流式共用同一套解析
+- 测试 57 → 61
 
 ## 0.5.4
 

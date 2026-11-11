@@ -929,5 +929,86 @@ class TestAutoExplain(unittest.TestCase):
         self.assertNotIn("ls\n", out)
 
 
+
+class TestAcpAndFim(unittest.TestCase):
+    """ACP agent 模式与 FIM 补全"""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp(prefix="dojo-acp-")
+        conf = os.path.join(self.home, ".config", "dojo")
+        os.makedirs(conf)
+        with open(os.path.join(conf, "config.toml"), "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        self.env = dict(os.environ, HOME=self.home,
+                        DOJO_CONFIG=os.path.join(conf, "config.toml"),
+                        DOJO_STATE_DIR=os.path.join(self.home, "state"))
+
+    def tearDown(self):
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_acp_initialize_and_session(self):
+        import json
+        p = subprocess.Popen([sys.executable, DOJO, "acp"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=self.env, text=True, bufsize=1)
+        try:
+            def send(obj):
+                p.stdin.write(json.dumps(obj) + "\n")
+                p.stdin.flush()
+
+            send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+                  "params": {"protocolVersion": 1, "clientCapabilities": {}}})
+            init = json.loads(p.stdout.readline())
+            self.assertEqual(init["result"]["protocolVersion"], 1)
+            self.assertEqual(init["result"]["agentInfo"]["name"], "dojo")
+
+            send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+                  "params": {"cwd": "/tmp", "mcpServers": []}})
+            new = json.loads(p.stdout.readline())
+            self.assertTrue(new["result"]["sessionId"].startswith("sess_"))
+
+            send({"jsonrpc": "2.0", "id": 3, "method": "no/such", "params": {}})
+            err = json.loads(p.stdout.readline())
+            self.assertEqual(err["error"]["code"], -32601)
+        finally:
+            p.stdin.close()
+            p.wait(timeout=10)
+
+    def test_acp_prompt_streams(self):
+        import io
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        m = load_module()
+        cfg = m.load_config()
+        sent = []
+        sess = {"cwd": "/tmp", "history": [], "cancel": __import__("threading").Event()}
+
+        def fake_stream(cfg_, messages, max_tokens=0):
+            yield "你"
+            yield "好"
+
+        buf = io.StringIO()
+        with mock.patch.object(m, "iter_model_stream", fake_stream), \
+             mock.patch.object(m, "_acp_update", lambda sid, t: sent.append(t)), \
+             redirect_stdout(buf):
+            reason = m._acp_run_prompt(cfg, 3, "sess_x", sess, "打个招呼")
+        self.assertEqual(reason, "end_turn")
+        self.assertEqual("".join(sent), "你好")
+        self.assertEqual(sess["history"][-1]["content"], "你好")
+        self.assertEqual(sess["history"][0]["content"], "打个招呼")
+
+    def test_fim_url(self):
+        m = load_module()
+        cfg = m.load_config()
+        self.assertEqual(m._fim_url(cfg), "https://api.deepseek.com/beta/completions")
+
+    def test_complete_without_prefix_fails_cleanly(self):
+        r = subprocess.run([sys.executable, DOJO, "complete"], env=self.env,
+                           input="", capture_output=True, text=True, timeout=30)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("用法", r.stderr)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
