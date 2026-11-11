@@ -669,5 +669,43 @@ class TestHookStderrPTY(unittest.TestCase):
         self.assertIn("HOOK_MARK", readfile(log))
 
 
+
+class TestDoLoop(unittest.TestCase):
+    """dojo run 不能跑一步就收摊，没用完的上下轮耍接着跑"""
+
+    def test_continues_until_done(self):
+        import copy
+        import types
+        from unittest import mock
+
+        m = load_module()
+        cfg = copy.deepcopy(m.DEFAULTS)
+        replies = ["```bash\ncat /etc/os-release\n```", "DONE"]
+        seen = []
+
+        def fake_model(cfg_, msgs, **kw):
+            seen.append(msgs)
+            return replies[min(len(seen) - 1, len(replies) - 1)]
+
+        class FakeRunner:
+            def __init__(self, *a, **kw):
+                self.last_run = types.SimpleNamespace(
+                    data={"steps": [{"cmd": "cat /etc/os-release", "rc": 0}]}
+                )
+
+            def execute(self, cmds):
+                return 0
+
+        fake_stdin = types.SimpleNamespace(isatty=lambda: True)
+        with mock.patch.object(m, "call_model", fake_model), \
+             mock.patch.object(m, "Runner", FakeRunner), \
+             mock.patch.object(m.sys, "stdin", fake_stdin), \
+             mock.patch("builtins.input", return_value=""):
+            m.cmd_do(cfg, ["装个中文输入法"], 5)
+        # 第一轮抓到「已执行过」的上下文，第二轮模型才能接着往下给命令
+        self.assertGreaterEqual(len(seen), 2)
+        self.assertIn("已经执行过这些", seen[1][-1]["content"] if isinstance(seen[1][-1], dict) else str(seen[1]))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

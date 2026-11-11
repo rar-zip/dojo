@@ -42,7 +42,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -1243,6 +1243,7 @@ class Runner:
         self.yes = yes
         self.question = question
         self.halted = False
+        self.last_run = None
         self.current_snapshot = None
         self.current_kind = "reversible"
         self.cwd = os.getcwd()
@@ -1621,6 +1622,7 @@ class Runner:
 
             if run is None:
                 run = Run(self.cwd, question=self.question)
+                self.last_run = run
                 self._active_write(run.id)
             print(f"\n第 {i}/{len(cmds)} 步 · {cmd}\n", flush=True)
 
@@ -1855,8 +1857,11 @@ def cmd_preview(cfg, args, level, yes=False, apply=True):
 PLAN_HINT = (
     "如果要动手，把命令放进一个 ```bash 代码块里，一行一条，按顺序。"
     "每条前面用一句话说明为什么。命令要能直接粘贴执行，别用占位符。"
-    "能一条解决就别拆成三条。不要用 sudo，除非没有别的办法。"
+    "先侦察再动手没问题，但别侦察完就停：把后面真要做的也按顺序一起写出来。"
+    "不要用 sudo，除非没有别的办法。"
 )
+
+DONE_MARK = "DONE"
 
 
 def extract_commands(text):
@@ -1887,10 +1892,26 @@ def cmd_do(cfg, args, level, yes=False, follow=True):
 
     persona_name = cfg.get("persona", {}).get("name", "老王")
     question = q
-    for _ in range(5):
+    carried = ""
+    for rnd in range(8):
         rows = read_ctx(int(cfg["context"]["history"]))
-        msgs = build_messages(cfg, rows, question + "\n\n" + PLAN_HINT, level)
+        ask = question + ("\n\n" + carried if carried else "")
+        msgs = build_messages(cfg, rows, ask + "\n\n" + PLAN_HINT, level)
         text = call_model(cfg, msgs, stream=False, max_tokens=900)
+        if rnd and text.strip().upper().startswith(DONE_MARK):
+            print(f"\n{persona_name}说这活儿做完了。要改就接着说，不然回车结束")
+            carried = ""
+            if not follow or yes or not sys.stdin.isatty():
+                return
+            try:
+                nxt = input().strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+            if not nxt or nxt.lower() in ("q", "quit", "exit"):
+                return
+            question = nxt
+            continue
         print(f"{persona_name}：")
         print(text.strip())
         cmds = extract_commands(text)
@@ -1905,17 +1926,34 @@ def cmd_do(cfg, args, level, yes=False, follow=True):
         if not sys.stdin.isatty() and not yes:
             print("\n没有交互终端，不执行。加 --yes 可以跳过确认（不建议）。")
             return
-        Runner(cfg, yes=yes, question=question).execute(cmds)
+        runner = Runner(cfg, yes=yes, question=question)
+        runner.execute(cmds)
+
+        steps = []
+        if runner.last_run is not None:
+            steps = runner.last_run.data.get("steps", [])
+        if steps:
+            done = "；".join(f"{st['cmd']}（退出码 {st['rc']}）" for st in steps)
+            carried = (
+                "这台机器上已经执行过这些，别再重复："
+                + done
+                + "\n原任务要是还没做完，就直接给下一步命令；做完了就只回一行 DONE。"
+            )
+        else:
+            carried = ""
+
         if not follow or yes or not sys.stdin.isatty():
             return
         try:
-            nxt = input("\n接着改？说一句想改什么，直接回车结束: ").strip()
+            nxt = input("\n回车继续下一步 / 直接打字改需求 / q 结束: ").strip()
         except (EOFError, KeyboardInterrupt):
             print()
             return
-        if not nxt:
+        if nxt.lower() in ("q", "quit", "exit"):
             return
-        question = nxt
+        if nxt:
+            question = nxt
+            carried = ""
 
 
 def cmd_run(cfg, args, level, yes=False):
