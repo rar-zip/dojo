@@ -1,26 +1,58 @@
 # dojo
 
-装在你自己 Linux 上的终端陪练。
+**面向 Linux 终端的受控 AI 陪练与交互式诊断工具（Human-in-the-Loop Terminal Copilot）**
 
-它看得见你敲的命令、退出码、目录，随时能问。默认只说话不动手；到了 L5 才允许代跑，而且一步一确认，跑前做快照，随时能停，默认回滚。
+[![Version](https://img.shields.io/github/v/release/rar-zip/dojo)](https://github.com/rar-zip/dojo/releases)
+[![License](https://img.shields.io/github/license/rar-zip/dojo)](https://github.com/rar-zip/dojo/blob/main/LICENSE)
+[![Python](https://img.shields.io/badge/python-3.11%2B-blue)](https://github.com/rar-zip/dojo)
 
-不是 agent。区别不在能力，在契约：
+[**`dojo`**](https://github.com/rar-zip/dojo) 是一个运行在本地 Linux 环境下的零依赖终端陪练工具。它通过轻量级 Shell Hook 实时感知你在终端中执行的命令、退出码、工作目录与标准错误输出（`stderr`），在你遇到报错或卡壳时按需提供诊断、思路或可执行方案。
 
-| | agent | dojo |
-|---|---|---|
-| 主体 | 给个目标，自己跑完 | 你操作，它陪 |
-| 默认权限 | 默认可执行 | 默认只读，执行要点头 |
-| 可见性 | 结果汇报 | 每一步实时 |
-| 停止 | 中断任务 | 刹车 + 回滚，停得干净 |
-| 成功标准 | 任务完成 | 你知道刚才发生了什么 |
+**核心设计原则：你是司机，它是副驾。`dojo` 严禁“无人值守”的自动执行状态。** 默认级别下它只读只说、绝不动手；仅在最高协助等级（L5）下才允许申请代跑命令，且严格遵循**“一步一确认、跑前做快照、中途可刹车、默认能回滚”**的安全契约。
 
-dojo 不允许「无人值守」这个状态存在。
+## 为什么是 `dojo` 而不是 Agent？
 
-## 装
+`dojo` 与自主型 Agent 的本质区别不在模型能力，而在**人机控制权契约**：
 
-需要 Linux + bash/zsh + python3.11 以上。
+| 维度 | 自主型 Agent | `dojo` 终端陪练 |
+| :--- | :--- | :--- |
+| **操作主体** | 用户下达目标，Agent 自主规划并跑完全程 | 用户主导操作，AI 在旁实时观察与辅助 |
+| **默认权限** | 默认具备命令执行与文件读写权限 | 默认纯只读（L1–L4），仅 L5 允许逐条点头代跑 |
+| **执行可见性** | 过程黑盒或事后汇总汇报 | 全程绑定当前 PTY 终端，每一步实时流式可见 |
+| **中断与停止** | 强制杀死进程，常遗留半成品脏现场 | **Ctrl+C 柔性刹车** + 自动快照回滚，确保现场干净 |
+| **系统架构** | 依赖复杂的运行时框架、容器或常驻守护进程 | **单文件 Python 标准库实现**，零第三方依赖，退出即终止 |
+| **成功标准** | 任务结果跑通 | 系统状态可控，且你清楚刚才发生了什么 |
 
-源码：
+## 核心特性
+
+- **报错空敲直答**：当上一条终端命令执行失败（退出码非 `0` 且在 1 小时内），直接在终端空敲 `dojo`，即可输出结构化的 **原因 / 猜测 / 可直接粘贴的修复方案**；若方案偏离预期，可通过 `dojo why "真实目的"` 携带报错现场重新生成。
+- **方案选号直接跑（`dojo 1` / `2` / `3`）**：报错卡片里的三条方案会存成 `last_card.json`，敲个数字就能跑第 N 条，走正常代跑链路，跑前照样有快照，`dojo undo` 照常能撤。
+- **`dojo diff` 回滚前预览**：拿 `runs/<id>/steps/` 的备份与当前工作区做 unified diff，撤之前先看清到底改了哪几行；目录快照逐个文件比，二进制自动跳过。
+- **保真 PTY 报错捕获**：Shell Hook 通过独立伪终端（PTY）桥接 `stderr`，在完整记录报错日志供 AI 诊断的同时，保持 `isatty(2)` 为真，**不破坏任何命令行工具的彩色输出与终端宽度感知**。
+- **Ctrl-G 行内补全**：装完 hook 之后，命令敲到一半按 `Ctrl-G`，把光标前后文丢给 `dojo complete`，补出来的片段直接塞回光标处（bash 用 `bind -x`，zsh 用 `zle`）。
+- **L1–L5 五级渐进式协助**：从“一句话点拨（L1）”、“原理讲解（L2）”、“指路与 man 页索引（L3）”、“代写命令（L4）”到“受控代跑（L5）”，按需切换介入深度。
+- **跑前快照与 SHA-256 校验回滚**：L5 代跑前自动解析命令影响面，对目标文件、目录、软链接及权限位创建快照；支持 `dojo undo` 单步撤销与 `dojo undo all` 全任务回滚，并校验还原后的文件 SHA-256 摘要。
+- **OverlayFS 无痕沙盒预演（`dojo preview`）**：基于 Linux 无特权用户命名空间（`unshare`）与 `overlayfs` 将当前目录挂载为隔离层，先在沙盒中运行复杂脚本或清理命令，审阅完 `新增 / 修改 / 删除` 差异清单后再决定应用或丢弃。
+- **智能提权协商（`offer_sudo`）**：识别需 `root` 权限的系统命令或在捕获到 `Permission denied` 时主动询问是否包装 `sudo` 重试，绝不自作主张提权。
+- **多层安全红线与密钥脱敏**：内置策略引擎硬性拦截删根、磁盘格式化、Fork 炸弹及 `/etc`、`/boot`、`/usr` 等受保护目录的写删操作；所有命令记录、日志与发往模型的上下文自动脱敏 `sk-*`、`Bearer`、`password=` 等敏感凭据。
+- **编辑器集成（ACP）与行内补全（FIM）**：内置符合 JSON-RPC 2.0 规范的 `dojo acp`（stdio 模式）供 Zed 等编辑器作为只读后端接入；提供 `dojo complete` 对接 DeepSeek FIM 接口实现命令行片段补全。
+
+## 快速安装
+
+### 环境要求
+
+- **操作系统**：Linux（支持 `bash` 或 `zsh`）
+- **运行时**：Python `>= 3.11`（仅使用内置标准库 `tomllib`、`pty`、`urllib` 等，无需 `pip` 安装任何第三方包）
+
+### 方式一：单文件一键安装（推荐）
+
+无需克隆仓库，直接拉取自包含安装脚本 [dist/dojo-install.sh](https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh)：
+
+```bash
+wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
+```
+
+### 方式二：源码安装
 
 ```bash
 git clone https://github.com/rar-zip/dojo.git ~/dojo
@@ -28,324 +60,237 @@ cd ~/dojo
 ./install.sh
 ```
 
-或者一行（自包含安装器，不依赖仓库）：
+安装完成后，重新打开一个终端或执行 `source ~/.bashrc`（Zsh 用户执行 `source ~/.zshrc`），运行自检命令确认环境就绪：
 
 ```bash
-wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
+dojo doctor
 ```
 
-装完新开一个终端，`dojo doctor` 自检。
-
-## 升级
-
-一行装的，直接：
+### 版本升级与卸载
 
 ```bash
-dojo upgrade
+dojo upgrade           # 一键拉取最新安装器并升级（旧版本自动备份至 ~/.local/state/dojo/backup/）
+dojo uninstall         # 移除二进制软链与 Shell Hook 配置块
+dojo uninstall --purge # 彻底卸载并清除 ~/.config/dojo 与 ~/.local/state/dojo 全部数据
 ```
 
-它会带进度条拉最新的安装脚本，问一句，然后覆盖 `~/.local/bin/dojo`，旧版备份在 `~/.local/state/dojo/backup/`
+## 命令速查手册
 
-源码装的：`cd ~/dojo && git pull && ./install.sh`
+| 命令格式 | 功能说明 | 权限要求 |
+| :--- | :--- | :--- |
+| `dojo` | **智能入口**：若上一条命令失败（1 小时内）则直接诊断报错；否则展示当前状态摘要 | 只读 |
+| `dojo 1` / `2` / `3` | **方案选号执行**：直接跑上一张报错卡片里的第 N 条方案 | 需 **L5** |
+| `dojo diff [ID]` | **回滚前预览**：对比指定运行（默认最近一次）的快照与当前工作区，打印 unified diff | 只读 |
+| `dojo status` | 强制查看版本、协助等级、模型配置、沙盒可用性及最近命令记录 | 只读 |
+| `dojo why "真实目的"` | 当默认报错方案不符合预期时，携带刚挂掉的命令现场与你的真实意图重新生成方案 | 只读 |
+| `dojo errors [N]` | 列出最近 `N` 条（默认 10 条）执行失败的命令、时间及退出码 | 只读 |
+| `dojo chat` | 启动持久化多轮对话（保留最近上下文，支持 `/run`、`/exec`、`/undo` 等内联指令） | 默认只读（内联执行需 L5） |
+| `dojo ask "问题"` | 单次快速提问，流式返回解答后立即退出 | 只读 |
+| `dojo explain` | 结合最近命令序列、退出码与 `stderr` 详细解释上一条命令发生了什么 | 只读 |
+| `dojo run "需求描述"` | **自然语言任务规划**：由模型生成完整命令方案并在 L5 下逐条确认代跑，支持多轮跟进直至 `DONE` | 规划只读，代跑需 **L5** |
+| `dojo exec "字面命令"` | **字面命令受控代跑**：跳过模型规划，在跑前快照、策略检查与刹车保护下直接执行指定命令 | 需 **L5** |
+| `dojo preview "命令"` | **沙盒无痕预演**：在 `overlayfs` 隔离层中试跑命令，展示文件变更清单后再决定 `--apply` 或 `--discard` | 需 **L5** |
+| `dojo undo [ID] [N\|all]` | 回滚最近一步（默认）、最近 `N` 步、整次运行（`all`）或指定历史运行 ID 的文件修改 | 本地恢复 |
+| `dojo stop [--abort]` | 跨终端向正在运行的任务发送停止请求（加 `--abort` 立即向执行进程发送 `SIGINT` 触发刹车） | 本地控制 |
+| `dojo history [N]` | 查看历次 L5 代跑的运行记录、步骤数与回滚状态 | 只读 |
+| `dojo commands [N]` | 查看所有被代跑命令的统一审计日志（`~/.local/state/dojo/commands.log`） | 只读 |
+| `dojo level [1-5]` | 查看或持久化切换默认协助等级 | 配置修改 |
+| `dojo config [get\|set]` | 查看脱敏后的全量配置，或读写指定配置项（如 `dojo config set context.auto_explain false`） | 配置修改 |
+| `dojo complete -p "前缀"` | 调用 FIM 接口补全命令或代码片段（支持 `-s "后缀"` 或通过 `stdin` 以 `\0` 分隔传入前后文） | 只读 |
+| `dojo acp` | 以 ACP（Agent Control Protocol）stdio JSON-RPC 2.0 模式启动，供编辑器作为只读 AI 后端接入 | 只读 |
+| `dojo log` | 查看 `dojo` 当前感知到的终端命令上下文、上一条 `stderr` 及最近一次代跑输出尾部 | 只读 |
+| `dojo doctor` | 检查 Python 版本、配置文件、API Key、Shell Hook 注入状态及快照目录写权限 | 只读 |
 
-拉不下来通常是 raw.githubusercontent.com 被墙，挂个代理再试，或者用源码那条路
+## 核心工作流详解
 
-## 用
+### 1. 报错空敲直答、`dojo why` 与选号执行
+
+当你在终端敲错命令或程序异常退出时，无需手打问题，直接敲 `dojo` 回车：
+
+```text
+$ notacommand --foo
+bash: notacommand: command not found
+
+$ dojo
+上一条命令挂了（退出码 127）：notacommand --foo
+
+原因  127 代表 shell 在 PATH 中找不到该可执行文件，通常是命令名拼写错误或软件包未安装
+猜测  你想测试某个 CLI 工具是否在当前环境中可用
+方案  1. command -v notacommand || echo "未找到该命令"
+      2. echo "$PATH" | tr ':' '\n'
+      直接跑：dojo 1（备选 dojo 2 / dojo 3），跑前照样有快照
+```
+
+如果三条猜测都不符合本意，直接补一句真实意图：
 
 ```bash
-dojo chat                   # 连着聊，问不清楚可以追问
-dojo                        # 当前状态
-dojo status                 # 详细状态
-dojo ask "这报错啥意思"      # 问一句就走
-dojo explain                # 解释上一条命令（带退出码和 stderr）
-dojo run "把日志里 500 的行数出来"   # 说人话，它出方案，L5 下逐步确认执行
-dojo exec "df -h"           # 直接跑一条字面命令（L5，仍要确认）
-dojo acp                    # 当 ACP agent 跑，给编辑器当后端
-dojo complete -p "grep -r TODO "   # FIM 补全，只吐补出来的那段
-dojo preview "rm -rf build"  # 沙盒里先跑一遍，看完再决定应用还是丢弃
-dojo undo                   # 撤掉最近一步
-dojo undo all               # 撤掉最近一次运行的全部步骤
-dojo history                # 看运行记录
-dojo commands               # 看代跑过的每一条命令（统一日志）
-dojo stop                   # 让正在跑的任务停手
-dojo level 3                # 切协助等级
-dojo log                    # 看它眼里的上下文
-dojo doctor                 # 自检
-dojo config get exec.ttl_days   # 看/改配置
-dojo uninstall              # 干净卸载（--purge 连状态一起删）
+dojo why "我想查看当前是哪个进程占用了 8080 端口"
 ```
 
-## 聊天
-
-`dojo chat` 是个常驻的对话，直接打字提问，接着上次的上下文继续，退出也不丢：
-
-```
-你> HTTP 是跑在什么上的
-老王：TCP，80 和 443 那两个端口。HTTP/3 例外，底下是 UDP。
-你> 那它跟 TCP 的区别一句话
-老王：...
-```
-
-里面还有几条命令：`/run 想做的事` 让它出方案、`/exec 命令` 直接跑字面命令、`/undo` 撤销、`/level` 切等级、`/log` 看上下文、`/clear` 清空对话、`/exit` 退出
-
-老王回话里如果带命令，L5 下会直接问你要不要跑，不用再打一遍 `dojo run`
-
-## 协助等级
-
-| 级 | 行为 |
-|---|---|
-| L1 | 旁观：只答不问，一句话 |
-| L2 | 讲解：讲原理，不给命令 |
-| L3 | 指路：给方向、关键词、man 页（默认） |
-| L4 | 代笔：给完整命令，你自己敲 |
-| L5 | 陪练：可以申请代跑，每条都要你点头 |
-
-L5 下 `dojo run "想做的事"` 的流程：
-
-1. 模型给出方案，命令放在代码块里，先全部打印出来
-2. 逐条问：`Enter 跑 / e 改 / s 跳过 / q 退出`
-3. 跑之前对这条命令会碰到的文件做快照
-4. 跑的时候按 Ctrl+C 进「刹车」：命令还在跑，你选怎么停
-5. 跑完可以接着说「还要改什么」，接着下一轮，不用重新起手
-
-## 刹车与回滚
-
-Ctrl+C 一次不会直接杀命令，先弹四个选项：
-
-```
-1) 就这样停：不再跑新步骤，这条命令让它跑完
-2) 中断并回滚：杀掉这条命令，把这一步的修改撤掉（默认）
-3) 撤掉整个任务：杀掉命令，这次运行做过的步骤全撤
-4) 继续跑：当我没按过
-```
-
-15 秒不选，按 2 处理。`stop.ask = false` 可以关掉询问，直接中断回滚；`stop.timeout_seconds` 改倒计时。
-
-回滚粒度：
-
-- **文件类**：> >> cp mv rm sed -i tee chmod chown mkdir 等，跑前把目标复制一份，撤的时候还原（新建的文件直接删掉）
-- 管道和 `&&` 会拆开逐段看，`cmd | tee f` 里的 f 也逃不掉
-- `find ... -delete` 会先空跑一遍列出命中项，再逐个快照
-- `xargs`、命令替换、`eval` 这种猜不准的，跑之前会明说撤不了，不装
-- 解压、git、rsync 这类按性质整目录快照
-- **系统类**：apt / systemctl / pip / docker / kill / useradd 这些做不了可靠快照，只给反向命令，不假装能撤
-- 单个文件或目录超过 `exec.max_snapshot_mb`（默认 200MB）就不快照，并明确告诉你
-
-说人话那个入口是 `dojo run`，`dojo exec` 才是跑字面命令，别搞混
-
-## 沙盒预演（dojo preview）
-
-快照靠的是「跑前把目标文件复制一份」，碰到复杂脚本、`git clean`、`make clean` 这种猜不准的，就只能整目录快照，或者明说撤不回来。
-
-`dojo preview` 换了个思路：把当前目录套一层 overlayfs，命令在隔离层里跑，改完了先看清单，再决定应用还是丢掉。
+看着某条顺眼，敲数字就能跑，不用复制粘贴：
 
 ```bash
-dojo preview "rm -rf build && make"          # 跑完问你 1 应用 2 丢弃
-dojo preview --apply "sed -i 's/a/b/' x.txt"  # 不问，直接应用
-dojo preview --discard "..."                  # 不问，直接丢
+dojo 1     # 跑上一张卡片的第一条方案
+dojo 3     # 第三条
 ```
 
-跑完会列出 `新增 / 修改 / 删除` 清单，默认丢弃。丢弃的话真实文件一个字节都没动过。
+跑的仍然是正常代跑链路，跑前有快照，出问题 `dojo undo` 一样能撤。撤之前想先看改了哪几行：
 
-前提和边界：
+```bash
+dojo diff              # 最近一次
+dojo diff 20261112-201530-...
+```
 
-- 需要内核允许无特权用户命名空间（`unshare -Ur` 能跑），和 overlayfs 支持；现代发行版基本都有
-- 只隔离**当前目录这一层**。写 `~/xxx`、`/tmp`、`/etc` 还是真写，别拿它试 `sudo rm -rf /`
-- `apt`、`systemctl` 这种要 root 的，在沙盒里本来就跑不动，不是隔离问题
-- 沙盒目录在 `~/.local/state/dojo/sandbox/`，跑完就删
+### 2. 五级协助等级（L1–L5）
 
-`dojo undo` 默认撤最近一步，`dojo undo all` 撤最近一次运行的全部步骤。
+通过 `dojo level <1-5>` 随时切换陪练介入程度：
 
-## 缺 root 权限怎么办
+| 等级 | 名称 | 行为边界与适用场景 | 允许代跑 |
+| :--- | :--- | :--- | :---: |
+| **L1** | 旁观 | 仅在被提问时用一句话极简作答，不主动展开，不给命令 | 否 |
+| **L2** | 讲解 | 阐述现象背后的 Linux 机制与原理，提供排查关键词，不直接给现成命令 | 否 |
+| **L3** | 指路 | **默认等级**。给出排查方向、关键参数与对应的 `man` 手册章节，培养独立操作手感 | 否 |
+| **L4** | 代笔 | 给出完整可直接复制的命令，但明确要求由你自己敲入终端 | 否 |
+| **L5** | 陪练 | 允许申请代跑命令：逐条确认、跑前自动快照、支持 Ctrl+C 刹车与一键回滚 | **是** |
 
-装包、改系统配置这类活，普通用户跑必然 `Permission denied`。dojo 不会假装没看见，也不会自作主张提权：
+### 3. L5 受控代跑、Ctrl+C 柔性刹车与智能回滚
 
-- 预案里出现 `apt` / `systemctl` / `useradd` 这类需要 root 的命令，而你还没加 sudo，跑之前先问一句「要我加上 sudo 吗」
-- 如果命令跑挂了，输出里出现 `Permission denied` / `are you root` 这类，会再问「要我加 sudo 重跑这一步吗」
-- 默认都是拒绝（只有提前那句是 Y），你说 y 才动
+在 L5 等级下执行 `dojo run "需求"` 时，`dojo` 会要求模型一次性给出从现状检查、变更执行到结果验证的完整命令序列（若模型仅给出 `cat`/`uname` 等纯只读侦察命令，会被自动打回要求补齐后续步骤）：
 
-提权这一步会按系统级操作处理：做不了可靠快照，`undo` 撤不回来，跑之前会明说。
+1. **逐条审批**：每一步执行前询问 `Enter 跑 / e 改 / s 跳过 / q 退出`。
+2. **智能提权询问**：若检测到 `apt`、`systemctl` 等需 root 权限的命令未加 `sudo`，或执行后输出包含 `Permission denied`，会主动询问是否使用 `sudo -- bash --noprofile --norc -c` 包装重跑。
+3. **Ctrl+C 柔性刹车**：在命令运行期间按下 `Ctrl+C`，**不会当场粗暴砍断进程留下半截脏现场**，而是由后台线程继续泵出 PTY 缓冲，同时弹出 4 选 1 刹车菜单（15 秒无操作或连按第二次 `Ctrl+C` 默认执行选项 `2`）：
 
-不想被问就 `dojo config set exec.offer_sudo false`。
+```text
+[刹车] 命令还在跑，先别急着走。
+ 1) 就这样停：不再跑新步骤，这条命令让它跑完
+ 2) 中断并回滚：杀掉这条命令，把这一步的修改撤掉（默认）
+ 3) 撤掉整个任务：杀掉命令，把这次运行做过的步骤全撤了
+ 4) 继续跑：当我没按过
+```
 
-## 接编辑器（ACP）
+**快照与回滚覆盖边界**：
 
-dojo 能把自己包成 ACP agent，编辑器通过 stdio 上的 JSON-RPC 连过来。Zed 这类支持 ACP 的客户端，配置里加一段：
+- **精确文件级快照**：自动解析重定向（`>`、`>>`）、管道中的 `tee` 以及 `cp`、`mv`、`rm`、`ln`、`sed -i`、`chmod`、`chown`、`mkdir`、`touch`、`truncate`、`dd` 等操作的目标路径，备份原文件、软链接目标、权限位并计算 `SHA-256` 校验和；对于 `mkdir -p a/b/c` 等多级新建目录，自动追踪最顶层不存在的父目录，回滚时彻底清理不留空壳。
+- **预演枚举快照**：针对 `find ... -delete`，在跑前自动通过 `find ... -print0` 预演列出命中文件（上限 500 项）并逐一快照。
+- **整目录兜底快照**：针对 `tar`、`unzip`、`git`、`rsync`、`patch` 等难以静态推断具体产出文件名的写入型命令，自动对当前工作目录执行整目录快照（受 `exec.max_snapshot_mb` 限制，默认 200MB）。
+- **动态参数透明告警**：针对包含命令替换 `$()`、反引号、管道 `xargs` 或 `eval` 的命令，在跑前明确告知无法静态预测目标路径，绝不伪造安全感。
+- **系统级操作反向建议**：针对 `apt`、`dnf`、`pacman`、`systemctl`、`pip`、`npm`、`docker`、`useradd`、`ufw` 等系统级不可逆操作，跑前明确标注无法通过文件拷贝回滚，并在回滚时生成对应的反向恢复命令（如 `sudo apt remove <pkg>`、`sudo systemctl stop <svc>`）。
+
+### 4. OverlayFS 沙盒预演（`dojo preview`）
+
+当面对复杂构建脚本、`make clean` 或不确定影响范围的批量替换时，可使用 `dojo preview` 在内核级 `overlayfs` 隔离层中先行试跑：
+
+```bash
+dojo preview "rm -rf build && sed -i 's/foo/bar/g' src/*.conf"
+dojo preview --apply "patch -p1 < fix.patch"   # 跑完免确认直接合并回真实目录
+dojo preview --discard "rm -rf *"              # 仅观察输出与改动清单，跑完直接丢弃
+```
+
+沙盒仅隔离当前工作目录（`upperdir` 位于 `~/.local/state/dojo/sandbox/`），跑完后自动对比并打印 `新增 / 修改 / 删除 / 目录` 变更清单。默认选择丢弃，真实工作区文件分毫未损。
+
+### 5. 编辑器接入（ACP）与命令行补全（FIM）
+
+**作为编辑器 ACP 后端（如 Zed）**：
+
+在编辑器的配置文件中添加 [bin/dojo](https://github.com/rar-zip/dojo/blob/main/bin/dojo) 的 `acp` 启动项：
 
 ```json
 {
   "agent_servers": {
-    "dojo": { "command": "dojo", "args": ["acp"] }
+    "dojo": {
+      "command": "dojo",
+      "args": ["acp"]
+    }
   }
 }
 ```
 
-实现了 `initialize`、`authenticate`、`session/new`、`session/prompt`、`session/cancel`，回答按 `session/update` 流式回包。**它只负责说话**：不接文件读写、不接终端控制，所以编辑器那边不会因为 dojo 自动改了什么。
+`dojo acp` 运行在标准输入输出（stdio）JSON-RPC 2.0 协议之上，支持 `initialize`、`authenticate`、`session/new`、`session/prompt` 与 `session/cancel`，通过 `session/update` 实时流式推送回答，并在能力握手时严格声明 `fs: false` 与 `terminal: false`，确保编辑器端完全只读、绝不越权改写代码。
 
-## 补全（FIM）
+**命令行 FIM 补全（`dojo complete`）与 Ctrl-G 绑定**：
 
 ```bash
-dojo complete -p "grep -r TODO "
-printf '%s\0%s' "前半段" "后半段" | dojo complete
+# 通过参数传入前缀与可选后缀
+dojo complete -p "find /var/log -name '*.log' " -n 64
+
+# 通过标准输入管道以 \0 分隔传入光标前后文（便于绑定至 Readline / ZLE 快捷键）
+printf '%s\0%s' "tar -czf backup.tar.gz " " --exclude=.git" | dojo complete
 ```
 
-走 DeepSeek 的 `/beta/completions`（FIM），只输出补出来的那一段，不加换行，方便 shell 的补全部件或编辑器直接吃。`-n 64` 控制长度。
+装完 hook 之后，`Ctrl-G` 已经绑到行内补全：命令敲到一半按下去，光标前后文自动丢给 `dojo complete`，补出来的片段接到光标处。想换键位，改 `lib/hook.bash` 里的 `bind -x` 或 `lib/hook.zsh` 里的 `bindkey` 那一行即可。
 
-## 安全红线
+## 配置文件参考
 
-有些东西它不替你碰，也不替你撤：
-
-- `rm -rf /`、`rm -rf ~`、`mkfs`、`fdisk`、fork 炸弹直接拒绝，不是弹窗，是根本不跑
-- 目标落在 `/etc`、`/boot`、`/usr`、`/var/lib`、`/sys`、`/proc` 的写删操作，按 `safety.deny_paths` 硬拦
-- 高风险删除、`dd`、`shred` 会在跑之前提示，`safety.require_typed_confirm = true` 时还要手打「确认」
-- 命令和对话里像 `sk-...`、`password=...`、`Bearer ...` 的东西，写日志和存档前会打码
-- 单步执行超过 `exec.max_step_seconds`（默认 600 秒）自动中断并回滚
-
-## 配置
-
-`~/.config/dojo/config.toml`（600）
+配置文件位于 `~/.config/dojo/config.toml`（文件权限强制为 `0600`），支持任意兼容 OpenAI Chat Completions 接口的模型服务：
 
 ```toml
 [model]
-base_url = "https://api.deepseek.com/v1"   # 任意 OpenAI 兼容接口
-model = "deepseek-flash"
-api_key = ""                                # 也可以 DEEPSEEK_API_KEY / DOJO_API_KEY
+base_url = "https://api.deepseek.com/v1"  # 支持 DeepSeek 或任意 OpenAI 兼容网关
+model = "deepseek-flash"                  # 推荐 deepseek-flash 或 deepseek-chat
+api_key = ""                              # 留空时自动读取环境变量 DEEPSEEK_API_KEY / DOJO_API_KEY / OPENAI_API_KEY
 stream = true
 timeout_seconds = 90
 
 [assist]
-level = 3
+level = 3                                 # 默认协助等级 (1-5)
 
 [context]
-history = 8
-capture_stderr = true
+history = 8                               # 携带最近 N 条终端命令作为上下文
+capture_stderr = true                     # 通过 PTY 代理捕获终端 stderr（保留颜色与 isatty）
+auto_explain = true                       # 空敲 dojo 且上一条命令失败时是否直接诊断报错
 
 [exec]
-max_snapshot_mb = 200
-max_step_seconds = 600
-ttl_days = 7
-capture_output = true      # 代跑的输出存一份，dojo log 能回看
-output_max_kb = 512        # 超过就砍一半
+max_snapshot_mb = 200                     # 单步快照最大体积上限 (MB)
+max_step_seconds = 600                    # 单步执行超时时间 (秒)，超时自动中断并回滚
+ttl_days = 7                              # 历史运行快照保留天数
+capture_output = true                     # L5 代跑时通过 PTY 捕获输出至 runs/<id>/output.log
+output_max_kb = 512                       # 单次运行输出日志轮转上限 (KB)
+offer_sudo = true                         # 识别缺 root 权限时是否主动询问提权
 
 [safety]
-redact_secrets = true
+redact_secrets = true                     # 落盘与请求模型前自动脱敏 API Key / Token / 密码
 deny_paths = ["/etc", "/boot", "/usr", "/var/lib", "/sys", "/proc"]
-require_typed_confirm = false
+require_typed_confirm = false             # 高风险操作是否要求手动输入“确认”二字
 
 [stop]
-ask = true
-timeout_seconds = 15
+ask = true                                # 按下 Ctrl+C 时是否弹出 4 选 1 刹车菜单（false 则直接中断并回滚）
+timeout_seconds = 15                      # 刹车菜单无操作自动回滚倒计时 (秒)
+
+[persona]
+name = "老王"                             # 陪练角色名称
 ```
 
-### 报错怎么答
+## 项目结构与开发测试
 
-空敲 `dojo` 时，失败的那条会在终端里被摊成三行：
-
+```text
+dojo/
+├── bin/
+│   └── dojo                  # 核心可执行程序（单文件零依赖 Python 实现）
+├── lib/
+│   ├── hook.bash             # Bash 命令记录与 PTY stderr 无损转发，含 Ctrl-G 补全
+│   └── hook.zsh              # Zsh 命令记录与 PTY stderr 无损转发，含 Ctrl-G 补全
+├── tools/
+│   └── build_installer.py    # 将 bin/dojo 与 lib/hook.* 编码合成为单文件安装器
+├── dist/
+│   └── dojo-install.sh       # 构建生成的自包含一行安装脚本
+├── tests/
+│   └── test_core.py          # 单元与端到端回归测试（解析 / 快照 / PTY / 沙盒 / ACP / FIM / hook）
+├── docs/
+│   ├── 技术方案.md            # 架构设计规范与停止/回滚状态机说明
+│   └── 路线图-v0.7-v1.0.md    # 后面几版怎么走
+├── install.sh                # 源码本地安装脚本
+└── Makefile                  # 常用构建与测试入口
 ```
-原因  127 就是 shell 找不到这个命令，八成是名字打错了
-猜测  你大概是想试某个命令，把占位符当真命令敲了
-方案  1. command -v notacommand || echo 没有这个命令
-      2. type -a notacommand; echo $PATH
-```
 
-方案那几行就是能直接粘进终端的命令，不是让你自己翻译的文字。
-
-方案都不对，直接说目的，让它重新算：
+在本地运行回归测试与打包构建：
 
 ```bash
-dojo why "我想看哪个进程占了 80 端口"
-```
+# 运行完整回归测试套件（严格模式，零告警容忍）
+python3 -W error tests/test_core.py
 
-它会带着刚才挂掉的命令和你的目的重新算一份，不再猜偏。
-
-方案看着对，敲个数字就能跑，不用复制粘贴：
-
-```bash
-dojo 1      # 跑上一张卡片的第一条方案
-dojo 3      # 第三条
-```
-
-走的是正常代跑链路，跑前有快照，出问题 `dojo undo` 一样能撤。
-
-撤之前想先看看改了哪几行：
-
-```bash
-dojo diff            # 最近一次运行
-dojo diff 20261112-201530-...
-```
-
-### Ctrl-G 行内补全
-
-装完 hook 之后，命令敲到一半按 `Ctrl-G`，它会把光标前后文丢给 `dojo complete`，补出来的直接塞回光标处。想换键位，改 `lib/hook.bash` 里的 `bind -x` 或 `lib/hook.zsh` 里的 `bindkey` 那一行就行。
-
-### auto_explain
-
-默认开。空敲 `dojo` 时，如果上一条命令是失败的（退出码非 0，且在一小时内），它不打印状态，直接告诉你为什么挂、先看哪里。不想被它主动搭话就 `dojo config set context.auto_explain false`。
-
-### capture_stderr
-
-默认开。shell 启动时给 stderr 接一对 PTY：数据照旧显示在终端、`isatty(2)` 仍然是真（颜色不丢），同时留一份到 `~/.local/state/dojo/stderr.log`，`dojo explain` 就能看到真正的报错。
-
-多了一个后台转发进程，退出 shell 自己会走。不想开就 `dojo config set context.capture_stderr false`。
-
-### capture_output
-
-默认开。`dojo run` / `dojo exec` 每次代跑都开 PTY，输出同时显示在终端并存进该次运行的 `output.log`（保留颜色和 `isatty`），`dojo log` 会带出最近一次输出的尾部。
-
-不想存就 `dojo config set exec.capture_output false`。
-
-## 它看到什么
-
-- 最近 N 条命令（默认 8）、退出码、当时目录
-- 上一条命令的 stderr（仅当 `capture_stderr = true`）
-- 当前协助等级
-
-看不到：屏幕内容、文件内容（除非你把内容贴进问题里）、别的终端。
-
-命令记录由 shell hook 完成。bash 和 zsh 都支持，装的时候按 `$SHELL` 自动选。
-
-## 它做不到什么
-
-- 需要交互输入的命令（sudo 密码、vim、top 这类全屏 TUI）不适合代跑，dojo 只跑非交互命令
-- `apt` / `systemctl` 这类系统级操作撤不回来，只能给反向命令
-- 不接管你的 shell，退出 dojo 进程就结束，没有后台常驻
-
-## 卸载
-
-```bash
-rm -f ~/.local/bin/dojo
-# 删掉 shell 配置里 # >>> dojo >>> 到 # <<< dojo <<< 之间的块
-rm -rf ~/.config/dojo ~/.local/state/dojo ~/.local/share/dojo
-```
-
-## 命令都记在哪
-
-L5 代跑过的每一条命令都会追加到 `~/.local/state/dojo/commands.log`，带时间、运行 ID、第几步、退出码：
-
-```
-2026-11-10 21:14:54  run=20261110-211454-468407  #1/1  rc=0  echo one > a.txt
-```
-
-`dojo commands` 看最近 20 条，`dojo commands 100` 看更多。日志只留最近两千行，不会无限长。
-
-## 开发
-
-```bash
-python3 -W error tests/test_core.py   # 76 个用例：解析 / 快照 / 回滚 / CLI / ACP / hook
-python3 tools/build_installer.py   # 生成 dist/dojo-install.sh
-```
-
-目录：
-
-```
-bin/dojo              主程序（单文件 python）
-lib/hook.bash         bash 命令记录
-lib/hook.zsh          zsh 命令记录
-install.sh            源码安装
-tools/build_installer.py  打一行安装器
-tests/test_core.py    回归测试
-docs/技术方案.md       设计与「停」的语义
-docs/路线图-v0.7-v1.0.md  接下来几版怎么走
+# 重新构建 dist/dojo-install.sh 单文件安装器
+python3 tools/build_installer.py
 ```
 
 ## 路线
@@ -368,6 +313,6 @@ docs/路线图-v0.7-v1.0.md  接下来几版怎么走
 
 细节在 [docs/路线图-v0.7-v1.0.md](docs/路线图-v0.7-v1.0.md)。
 
-## License
+## 开源许可
 
-MIT
+本项目基于 [MIT License](https://github.com/rar-zip/dojo/blob/main/LICENSE) 开源。
