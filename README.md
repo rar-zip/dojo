@@ -258,6 +258,26 @@ dojo why "我想看哪个进程占了 80 端口"
 
 它会带着刚才挂掉的命令和你的目的重新算一份，不再猜偏。
 
+方案看着对，敲个数字就能跑，不用复制粘贴：
+
+```bash
+dojo 1      # 跑上一张卡片的第一条方案
+dojo 3      # 第三条
+```
+
+走的是正常代跑链路，跑前有快照，出问题 `dojo undo` 一样能撤。
+
+撤之前想先看看改了哪几行：
+
+```bash
+dojo diff            # 最近一次运行
+dojo diff 20261112-201530-...
+```
+
+### Ctrl-G 行内补全
+
+装完 hook 之后，命令敲到一半按 `Ctrl-G`，它会把光标前后文丢给 `dojo complete`，补出来的直接塞回光标处。想换键位，改 `lib/hook.bash` 里的 `bind -x` 或 `lib/hook.zsh` 里的 `bindkey` 那一行就行。
+
 ### auto_explain
 
 默认开。空敲 `dojo` 时，如果上一条命令是失败的（退出码非 0，且在一小时内），它不打印状态，直接告诉你为什么挂、先看哪里。不想被它主动搭话就 `dojo config set context.auto_explain false`。

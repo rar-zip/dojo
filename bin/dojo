@@ -9,6 +9,8 @@
   dojo chat                连着聊，问不清楚可以追问
   dojo ask "问题"           问一句就走
   dojo explain             解释上一条命令
+  dojo 1 / 2 / 3           直接跑上一张报错卡片里的第 N 条方案
+  dojo diff [ID]           撤之前先看清改了哪几行
   dojo do "想做的事"        让它给方案；L5 下逐步确认执行
   dojo run "命令"           直接跑一条（仍然要确认）
   dojo preview "命令"       在 overlayfs 沙盒里先跑，看完再决定应用或丢弃
@@ -43,7 +45,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.6.2"
+VERSION = "0.7.0"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -53,6 +55,7 @@ RUNS_DIR = os.path.join(STATE_DIR, "runs")
 HALT_PATH = os.path.join(STATE_DIR, "halt")
 ACTIVE_PATH = os.path.join(STATE_DIR, "active.json")
 CHAT_PATH = os.path.join(STATE_DIR, "chat.json")
+LAST_CARD_PATH = os.path.join(STATE_DIR, "last_card.json")
 COMMANDS_LOG = os.path.join(STATE_DIR, "commands.log")
 
 _RUN_SEQ = itertools.count(1)
@@ -60,7 +63,7 @@ _RUN_SEQ = itertools.count(1)
 
 def _refresh_paths():
     """根据当前环境变量动态刷新路径，便于测试隔离与运行时切换。"""
-    global CONFIG_PATH, STATE_DIR, CTX_PATH, ERR_PATH, RUNS_DIR, HALT_PATH, ACTIVE_PATH, CHAT_PATH, COMMANDS_LOG
+    global CONFIG_PATH, STATE_DIR, CTX_PATH, ERR_PATH, RUNS_DIR, HALT_PATH, ACTIVE_PATH, CHAT_PATH, COMMANDS_LOG, LAST_CARD_PATH
     CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
     STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
     CTX_PATH = os.path.join(STATE_DIR, "ctx.tsv")
@@ -70,6 +73,7 @@ def _refresh_paths():
     ACTIVE_PATH = os.path.join(STATE_DIR, "active.json")
     CHAT_PATH = os.path.join(STATE_DIR, "chat.json")
     COMMANDS_LOG = os.path.join(STATE_DIR, "commands.log")
+    LAST_CARD_PATH = os.path.join(STATE_DIR, "last_card.json")
 
 
 DEFAULTS = {
@@ -2655,7 +2659,21 @@ def _clean_solution(text):
     return t.strip()
 
 
-def _print_error_card(data, persona_name=""):
+def _save_error_card(cmd, cwd, sols):
+    """把这张卡片的方案存下来，dojo 1/2/3 才有东西可选。"""
+    _refresh_paths()
+    try:
+        os.makedirs(STATE_DIR, exist_ok=True)
+        payload = {"cmd": cmd or "", "cwd": cwd or os.getcwd(),
+                   "solutions": sols, "ts": int(time.time())}
+        with open(LAST_CARD_PATH, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False)
+        os.chmod(LAST_CARD_PATH, 0o600)
+    except OSError:
+        pass
+
+
+def _print_error_card(data, persona_name="", cmd=None, cwd=None):
     cause = str(data.get("cause") or "").strip()
     guess = str(data.get("guess") or "").strip()
     sols = data.get("solutions") or []
@@ -2671,6 +2689,10 @@ def _print_error_card(data, persona_name=""):
         print(("方案  " if i == 1 else "      ") + f"{i}. {sol}")
     if not (cause or guess or sols):
         return False
+    if sols:
+        _save_error_card(cmd, cwd, sols)
+        if sys.stdout.isatty():
+            print("       直接跑：dojo 1（备选 dojo 2 / dojo 3），跑前照样有快照")
     return True
 
 
@@ -2706,7 +2728,7 @@ def cmd_error_answer(cfg, level, row):
         max_tokens=800,
     )
     data = _parse_json_loose(res)
-    if data and _print_error_card(data):
+    if data and _print_error_card(data, cmd=row.get("cmd"), cwd=row.get("cwd")):
         pass
     else:
         print(res.strip())
@@ -2740,11 +2762,119 @@ def cmd_why(cfg, args, level):
         max_tokens=800,
     )
     data = _parse_json_loose(res)
-    if data and _print_error_card(data):
+    if data and _print_error_card(data, cmd=row.get("cmd"), cwd=row.get("cwd")):
         pass
     else:
         print(res.strip())
     print('\n还想补一句？dojo why "补充说明" 或 dojo chat 接着聊')
+
+
+def cmd_pick(cfg, level, idx):
+    """dojo 1 / 2 / 3：直接跑上一张报错卡片里的第 N 条方案。"""
+    _refresh_paths()
+    if not os.path.exists(LAST_CARD_PATH):
+        eprint('还没有报错卡片。先空敲一次 dojo，或者 dojo why "我其实想……"。')
+        sys.exit(1)
+    try:
+        with open(LAST_CARD_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        eprint("报错卡片读不出来，重新空敲一次 dojo 吧。")
+        sys.exit(1)
+    sols = [str(x).strip() for x in (data.get("solutions") or []) if str(x).strip()]
+    if not sols:
+        eprint("上一张卡片没有可用方案。")
+        sys.exit(1)
+    if idx < 1 or idx > len(sols):
+        eprint(f"上一张卡片只有 {len(sols)} 条方案，能选 dojo 1 到 dojo {len(sols)}。")
+        sys.exit(1)
+    cmd = sols[idx - 1]
+    cwd = data.get("cwd") or ""
+    if cwd and os.path.isdir(cwd):
+        os.chdir(cwd)
+    print(f"方案 {idx}：{cmd}", flush=True)
+    cmd_run(cfg, [cmd], level, yes=False)
+
+
+def _path_diff_text(old, new, label):
+    """给一对文件出 diff 文本；二进制或读不了就返回 None。"""
+    import difflib
+    try:
+        with open(old, "rb") as f:
+            raw_a = f.read()
+        with open(new, "rb") as f:
+            raw_b = f.read()
+    except OSError:
+        return None
+    if b"\0" in raw_a or b"\0" in raw_b:
+        return f"（{label} 是二进制，跳过）\n"
+    a = raw_a.decode("utf-8", "replace").splitlines(keepends=True)
+    b = raw_b.decode("utf-8", "replace").splitlines(keepends=True)
+    out = list(difflib.unified_diff(a, b, fromfile="备份/" + label, tofile="现在/" + label))
+    if not out:
+        return None
+    text = "".join(out)
+    if not text.endswith("\n"):
+        text += "\n"
+    return text
+
+
+def cmd_diff(cfg, args):
+    """dojo diff [运行ID]：undo 之前先看清到底改了哪几行。"""
+    _refresh_paths()
+    run_id = args[0] if args and args[0] else latest_run()
+    if not run_id:
+        print("还没有运行记录。")
+        return
+    try:
+        data, _ = load_run(run_id)
+    except Exception:
+        eprint(f"找不到运行 {run_id}")
+        sys.exit(1)
+    steps = data.get("steps", [])
+    print(f"{run_id}  {len(steps)} 步")
+    changed = 0
+    for step in steps:
+        records = step.get("records") or []
+        if not records:
+            continue
+        step_dir = os.path.join(RUNS_DIR, run_id, "steps", "%03d" % int(step.get("n") or 0))
+        texts = []
+        for rec in records:
+            path = rec.get("path") or ""
+            if rec.get("skipped") or "backup" not in rec:
+                continue
+            src = os.path.join(step_dir, str(rec["backup"]))
+            kind = rec.get("kind")
+            if kind == "symlink" or not os.path.exists(src):
+                continue
+            if kind == "file":
+                if not os.path.exists(path):
+                    texts.append(f"删除状态：{path}\n")
+                    continue
+                text = _path_diff_text(src, path, path)
+                if text:
+                    texts.append(text)
+                continue
+            for root, _dirs, files in os.walk(src):
+                for name in files:
+                    old_f = os.path.join(root, name)
+                    rel = os.path.relpath(old_f, src)
+                    new_f = os.path.join(path, rel)
+                    if not os.path.exists(new_f):
+                        texts.append(f"少了：{new_f}\n")
+                        continue
+                    text = _path_diff_text(old_f, new_f, new_f)
+                    if text:
+                        texts.append(text)
+        if texts:
+            changed += 1
+            flag = "（已撤）" if step.get("undone") else ""
+            print(f"\n# {step.get('n')}. {flag}{step.get('cmd')}")
+            sys.stdout.write("".join(texts))
+    if not changed:
+        print("\n没有差异，当前工作区跟快照一致。")
+    print("\n确认没问题再撤：dojo undo " + run_id)
 
 
 def cmd_errors(cfg, args):
@@ -3265,7 +3395,11 @@ def usage():
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
         "  dojo errors [N]          列最近的失败命令\n"
-        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"        "  dojo acp                 以 ACP agent 方式跑（stdio），给编辑器接\n"        "  dojo complete -p \"…\"     FIM 补全，只输出补出来的那一段\n"
+        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"
+        "  dojo 1 / 2 / 3           直接跑上一张报错卡片里的第 N 条方案\n"
+        "  dojo diff [ID]           撤之前先看清改了哪几行\n"
+        "  dojo acp                 以 ACP agent 方式跑（stdio），给编辑器接\n"
+        "  dojo complete -p \"…\"     FIM 补全，只输出补出来的那一段\n"
         "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
         "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
         "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
@@ -3324,6 +3458,10 @@ def main():
         cmd_undo(cfg, args[1:])
     elif cmd in ("errors", "err"):
         cmd_errors(cfg, args[1:])
+    elif cmd == "diff":
+        cmd_diff(cfg, args[1:])
+    elif cmd.isdigit():
+        cmd_pick(cfg, level, int(cmd))
     elif cmd in ("why", "fix"):
         cmd_why(cfg, args[1:], level)
     elif cmd == "acp":

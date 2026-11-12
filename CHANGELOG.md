@@ -1,5 +1,15 @@
 # 更新记录
 
+## 0.7.0
+
+交互手感这一层收口，把已经通了的能力真正接到手边。
+
+- **`dojo 1` / `dojo 2` / `dojo 3` 直接跑方案**：报错卡片里的三条方案现在会存成 `last_card.json`，敲个数字就能跑第 N 条，走 `Runner`，跑前照样有快照，`dojo undo` 照常能撤
+- **`dojo diff [运行ID]`**：撤之前先看清楚改了哪几行。拿 `runs/<id>/steps/` 的备份跟当前工作区做 unified diff，目录快照会逐个文件比，二进制跳过
+- **Ctrl-G 行内补全**：`lib/hook.bash` 用 `bind -x` + `READLINE_LINE`，`lib/hook.zsh` 用 `zle` + `LBUFFER`，敲命令敲到一半按 Ctrl-G，把光标前后文丢给 `dojo complete`，补出来的直接塞回光标处。想换键位改 hook 里那行 `bind` / `bindkey` 就行
+- 修一处帮助文本少换行，`dojo why` 和 `dojo acp` 两行以前粘在一起
+- 测试 69 → 76
+
 ## 0.6.2
 
 - **hook 转发不再吐 `\r\r\n`**：内层 PTY 关掉 `OPOST` 之后，程序自己写的 `\r\n` 会被外层终端再转一次。转发时把连续的 `\r` 压成一个，`\r` 和 `\n` 被拆进两次 read 的情况也处理了（攒住结尾的 `\r` 等下一块）

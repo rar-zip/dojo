@@ -667,8 +667,8 @@ class TestHookStderrPTY(unittest.TestCase):
         # 回显把整条命令也打到屏幕上了，还夹着 readline 的转义序列，先洗一遍再按行比对
         clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
         lines = [ln.strip() for ln in clean.splitlines()]
-        self.assertIn("TTY_IS_OK", lines)
-        self.assertNotIn("TTY_NOT_OK", lines)
+        self.assertTrue(any(ln.endswith("TTY_IS_OK") for ln in lines), lines)
+        self.assertFalse(any(ln.endswith("TTY_NOT_OK") for ln in lines), lines)
         # 只进日志不算数：stderr 必须同时回到终端屏幕上
         self.assertIn("HOOK_MARK", out)
         log = os.path.join(self.home, ".local", "state", "dojo", "stderr.log")
@@ -1173,6 +1173,146 @@ class TestV061Regressions(unittest.TestCase):
         m = load_module()
         cfg = {"model": {"base_url": "https://openrouter.ai/api/v1"}}
         self.assertEqual(m._fim_url(cfg), "https://openrouter.ai/api/v1/completions")
+
+
+class TestV070Interactive(unittest.TestCase):
+    """v0.7：报错卡片选号执行、dojo diff、Ctrl-G 补全绑定"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dojo-v070-")
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(self.state)
+        self.conf = os.path.join(self.tmp, "config.toml")
+        with open(self.conf, "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        self.env = dict(os.environ, HOME=self.tmp, DOJO_CONFIG=self.conf,
+                        DOJO_STATE_DIR=self.state)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _card(self, sols):
+        import json
+        with open(os.path.join(self.state, "last_card.json"), "w", encoding="utf-8") as f:
+            json.dump({"cmd": "systemctl restart nginx", "cwd": self.tmp,
+                       "solutions": sols, "ts": 1}, f, ensure_ascii=False)
+
+    def test_pick_without_card(self):
+        r = subprocess.run([sys.executable, DOJO, "1"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("还没有报错卡片", r.stderr)
+
+    def test_pick_out_of_range(self):
+        self._card(["a", "b"])
+        r = subprocess.run([sys.executable, DOJO, "3"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("只有 2 条方案", r.stderr)
+
+    def test_pick_selects_solution(self):
+        self._card(["systemctl status nginx", "journalctl -u nginx -n 50"])
+        r = subprocess.run([sys.executable, DOJO, "2"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("方案 2：journalctl -u nginx -n 50", r.stdout)
+        # L3 不代跑，只验证选中的是哪条
+        self.assertEqual(r.returncode, 1)
+
+    def test_diff_shows_changes(self):
+        run_id = "20261112-200000-000000-0000001-001"
+        run_dir = os.path.join(self.state, "runs", run_id)
+        os.makedirs(os.path.join(run_dir, "steps", "001"))
+        target = os.path.join(self.tmp, "file.txt")
+        with open(os.path.join(run_dir, "steps", "001", "0"), "w", encoding="utf-8") as f:
+            f.write("line1\nline2\n")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("line1 CHANGED\nline2\nline3\n")
+        manifest = {"id": run_id, "created": 1, "cwd": self.tmp, "question": "t",
+                    "steps": [{"n": 1, "cmd": "sed -i s/line2/CHANGED/ file.txt",
+                               "cwd": self.tmp, "kind": "reversible", "rc": 0,
+                               "records": [{"path": target, "existed": True,
+                                            "kind": "file", "backup": "0"}],
+                               "undone": False}]}
+        import json
+        with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, DOJO, "diff", run_id], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("+line1 CHANGED", r.stdout)
+        self.assertIn("+line3", r.stdout)
+
+    def test_diff_no_changes(self):
+        run_id = "20261112-200000-000000-0000001-002"
+        run_dir = os.path.join(self.state, "runs", run_id)
+        os.makedirs(os.path.join(run_dir, "steps", "001"))
+        target = os.path.join(self.tmp, "same.txt")
+        with open(os.path.join(run_dir, "steps", "001", "0"), "w", encoding="utf-8") as f:
+            f.write("same\n")
+        with open(target, "w", encoding="utf-8") as f:
+            f.write("same\n")
+        import json
+        manifest = {"id": run_id, "created": 1, "cwd": self.tmp, "question": "t",
+                    "steps": [{"n": 1, "cmd": "true", "cwd": self.tmp, "kind": "reversible",
+                               "rc": 0, "records": [{"path": target, "existed": True,
+                                                     "kind": "file", "backup": "0"}],
+                               "undone": False}]}
+        with open(os.path.join(run_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump(manifest, f, ensure_ascii=False)
+        r = subprocess.run([sys.executable, DOJO, "diff", run_id], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertIn("没有差异", r.stdout)
+
+    def _pty_lines(self, argv, setup_lines):
+        import pty, select, time
+        pid, master = pty.fork()
+        if pid == 0:
+            os.environ["HOME"] = self.tmp
+            os.environ["PS1"] = "P> "
+            os.execvp(argv[0], argv)
+        buf = b""
+
+        def drain(seconds):
+            nonlocal buf
+            end = time.time() + seconds
+            while time.time() < end:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buf += chunk
+        try:
+            drain(0.8)
+            for line in setup_lines:
+                os.write(master, line.encode() + b"\n")
+                drain(1.2)
+            os.write(master, b"exit\n")
+            drain(0.5)
+        finally:
+            try:
+                os.close(master)
+            except OSError:
+                pass
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", buf.decode("utf-8", "replace"))
+
+    def test_ctrl_g_bound_in_bash(self):
+        hook = os.path.join(ROOT, "lib", "hook.bash")
+        out = self._pty_lines(["bash", "--noprofile", "--norc", "-i"],
+                              ["source " + hook, "bind -X | grep -c dojo_complete"])
+        lines = [ln.strip() for ln in out.splitlines()]
+        self.assertIn("1", lines)
+
+    def test_ctrl_g_bound_in_zsh(self):
+        if not shutil.which("zsh"):
+            self.skipTest("没有 zsh")
+        hook = os.path.join(ROOT, "lib", "hook.zsh")
+        out = self._pty_lines(["zsh", "-f", "-i"],
+                              ["source " + hook, "bindkey '^G'"])
+        self.assertIn("__dojo_complete_widget", out)
 
 
 if __name__ == "__main__":

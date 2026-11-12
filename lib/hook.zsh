@@ -137,3 +137,18 @@ if command -v add-zsh-hook >/dev/null 2>&1; then
 else
   precmd_functions+=(__dojo_hook)
 fi
+
+# Ctrl-G：把光标处的命令丢给 dojo complete 补完，补出来的直接塞回命令行
+__dojo_complete_widget() {
+  local bin="${DOJO_BIN:-}"
+  if [ -z "$bin" ]; then
+    bin=$(command -v dojo 2>/dev/null) || return 0
+  fi
+  [ -x "$bin" ] || return 0
+  local out
+  out=$(printf '%s\0%s' "$LBUFFER" "$RBUFFER" | "$bin" complete 2>/dev/null) || return 0
+  [ -z "$out" ] && return 0
+  LBUFFER="${LBUFFER}${out}"
+}
+zle -N __dojo_complete_widget 2>/dev/null
+bindkey '^G' __dojo_complete_widget 2>/dev/null

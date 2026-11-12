@@ -163,3 +163,18 @@ else
     *) PROMPT_COMMAND="__dojo_hook${PROMPT_COMMAND:+;$PROMPT_COMMAND}" ;;
   esac
 fi
+
+# Ctrl-G：把光标处的命令丢给 dojo complete 补完，补出来的直接塞回命令行
+__dojo_complete_widget() {
+  local bin="${DOJO_BIN:-}"
+  if [ -z "$bin" ]; then
+    bin=$(command -v dojo 2>/dev/null) || return 0
+  fi
+  [ -x "$bin" ] || return 0
+  local pre="${READLINE_LINE:0:$READLINE_POINT}" post="${READLINE_LINE:$READLINE_POINT}" out
+  out=$(printf '%s\0%s' "$pre" "$post" | "$bin" complete 2>/dev/null) || return 0
+  [ -z "$out" ] && return 0
+  READLINE_LINE="${pre}${out}${post}"
+  READLINE_POINT=$((READLINE_POINT + ${#out}))
+}
+bind -x '"\C-g": __dojo_complete_widget' 2>/dev/null
