@@ -3545,6 +3545,11 @@ def main():
     elif cmd in ("-h", "--help", "help"):
         usage()
     else:
+        # 以 - 开头的是选项，不是人话，别拿去问模型
+        if args[0].startswith("-"):
+            eprint(f"没有 {args[0]} 这个选项")
+            usage()
+            sys.exit(1)
         # 没匹配到子命令：整串参数当成你对老王说的话
         typo = looks_like_typo(args[0]) if len(args) == 1 else None
         if typo:
