@@ -66,6 +66,21 @@ wget -qO- https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/ma
 
 想钉死某个源：`DOJO_INSTALL_URL=<地址> dojo upgrade`
 
+### 方式三：离线安装（虚拟机没外网）
+
+机器上不了网、或者报 `Network is unreachable` 时，在能上网的机器上下载安装脚本，拷过去再跑：
+
+```bash
+# 联网机器
+wget -qO dojo-install.sh https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh
+
+# 拷到目标机器后
+bash dojo-install.sh                      # 全新安装
+dojo upgrade --file dojo-install.sh       # 已经装过 dojo 时升级
+```
+
+`dojo` 下载时会优先走 IPv4：有些小机器只解析到 AAAA 记录却没有 v6 出口，会直接 `ENETUNREACH`。
+
 ### 方式二：源码安装
 
 ```bash

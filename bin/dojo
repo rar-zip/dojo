@@ -36,6 +36,7 @@ import re
 import select
 import shlex
 import shutil
+import socket
 import signal
 import stat
 import subprocess
@@ -46,7 +47,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.3"
+VERSION = "0.8.4"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -3237,12 +3238,15 @@ def fetch_installer(explicit=None, timeout=20, tries=2):
     """依次试几个源，每个源最多试 tries 次；返回 (脚本字节, 用的源)，全挂返回 (None, 原因)。"""
     cands = [("DOJO_INSTALL_URL", explicit)] if explicit else list(INSTALL_MIRRORS)
     errs = []
+    first_exc = None
     for label, url in cands:
         last = ""
         for attempt in range(1, tries + 1):
             try:
                 data = download_with_progress(url, timeout=timeout)
             except Exception as e:  # noqa: BLE001 网络问题什么都有
+                if first_exc is None:
+                    first_exc = e
                 last = type(e).__name__
                 if attempt < tries:
                     time.sleep(1.5)
@@ -3252,47 +3256,117 @@ def fetch_installer(explicit=None, timeout=20, tries=2):
             last = "内容不对"
             break
         errs.append(f"{label} 不通（{last}）")
-    return None, "；".join(errs) or "没有可用源"
+    msg = "；".join(errs) or "没有可用源"
+    if first_exc is not None:
+        msg += "\n " + net_hint(first_exc)
+    return None, msg
+
+
+def _ipv4_gai(orig):
+    """小机器常见坑：只解析到 IPv6，但没有 v6 出口，直接 ENETUNREACH。优先拿 A 记录。"""
+
+    def gai(host, port, family=0, type=0, proto=0, flags=0):
+        try:
+            infos = orig(host, port, socket.AF_INET, type, proto, flags)
+        except OSError:
+            infos = []
+        if infos:
+            return infos
+        return orig(host, port, family, type, proto, flags)
+
+    return gai
+
+
+def net_hint(exc):
+    """把网络异常翻成人话，别让用户对着 Errno 101 发呆。"""
+    text = str(exc)
+    code = getattr(exc, "errno", None)
+    if code in (101, 99) or "Network is unreachable" in text:
+        return ("这台机器没有可用路由：常见是只解析到 IPv6 但没有 v6 出口，"
+                "或者根本没配默认网关。先 `ip route` / `ping 223.5.5.5` 看一眼，"
+                "能上网就用离线安装（下面有命令）")
+    if code in (110, 60) or "timed out" in text.lower():
+        return "连接超时，多半是网络被墙或限速，换个源或者用离线安装"
+    if code == 111 or "Connection refused" in text:
+        return "连接被拒，本地代理挂了的话先关掉 http_proxy / https_proxy 再试"
+    if "Name or service not known" in text or "Temporary failure in name resolution" in text:
+        return "域名解析失败，先看 /etc/resolv.conf 或换 DNS"
+    return text
 
 
 def download_with_progress(url, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": "dojo/%s" % VERSION})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        total = int(r.headers.get("Content-Length") or 0)
-        chunks, got = [], 0
-        while True:
-            chunk = r.read(16384)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            got += len(chunk)
-            if sys.stdout.isatty():
-                if total:
-                    pct = min(100, got * 100 // total)
-                    filled = pct * 24 // 100
-                    sys.stdout.write("\r  [%s%s] %3d%%  %d/%d KB" % (
-                        "#" * filled, "-" * (24 - filled), pct, got // 1024, total // 1024))
-                else:
-                    sys.stdout.write("\r  已下载 %d KB" % (got // 1024))
-                sys.stdout.flush()
+    orig_gai = socket.getaddrinfo
+    socket.getaddrinfo = _ipv4_gai(orig_gai)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _read_body(r, timeout)
+    finally:
+        socket.getaddrinfo = orig_gai
+
+
+def _read_body(r, timeout=30):
+    total = int(r.headers.get("Content-Length") or 0)
+    chunks, got = [], 0
+    while True:
+        chunk = r.read(16384)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        got += len(chunk)
         if sys.stdout.isatty():
-            sys.stdout.write("\n")
+            if total:
+                pct = min(100, got * 100 // total)
+                filled = pct * 24 // 100
+                sys.stdout.write("\r  [%s%s] %3d%%  %d/%d KB" % (
+                    "#" * filled, "-" * (24 - filled), pct, got // 1024, total // 1024))
+            else:
+                sys.stdout.write("\r  已下载 %d KB" % (got // 1024))
             sys.stdout.flush()
+    if sys.stdout.isatty():
+        sys.stdout.write("\n")
+        sys.stdout.flush()
     return b"".join(chunks)
 
 
 def cmd_upgrade(args):
     _refresh_paths()
     yes = "--yes" in args
-    explicit = os.environ.get("DOJO_INSTALL_URL")
-    print("拉最新版" if explicit else "拉最新版（raw 不通会自动换镜像）")
-    data, src = fetch_installer(explicit)
-    if data is None:
-        eprint(f"拉不下来：{src}")
-        eprint("换个网、开代理，或者源码目录里 git pull 再 ./install.sh")
-        eprint("也可以自己指定：DOJO_INSTALL_URL=<镜像地址> dojo upgrade")
-        sys.exit(1)
-    print(f"  用的是 {src}，{len(data) // 1024} KB")
+    local = None
+    if "--file" in args:
+        idx = args.index("--file")
+        if idx + 1 < len(args):
+            local = args[idx + 1]
+        else:
+            eprint("用法：dojo upgrade --file <安装脚本路径>")
+            sys.exit(1)
+    if local:
+        try:
+            with open(os.path.expanduser(local), "rb") as f:
+                data = f.read()
+        except OSError as e:
+            eprint(f"读不到 {local}：{e}")
+            sys.exit(1)
+        src = f"本地文件 {local}"
+        if b"dojo" not in data[:3000]:
+            eprint("这个文件不像 dojo 安装脚本，先不动")
+            sys.exit(1)
+        print(f"  用的是 {src}，{len(data) // 1024} KB", flush=True)
+    else:
+        explicit = os.environ.get("DOJO_INSTALL_URL")
+        print("拉最新版" if explicit else "拉最新版（raw 不通会自动换镜像）")
+        data, src = fetch_installer(explicit)
+        if data is None:
+            eprint("拉不下来，每个源都试过了：")
+            eprint(src)
+            eprint("")
+            eprint("离线装法：在能上网的机器上跑")
+            eprint("  wget -qO dojo-install.sh https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh")
+            eprint("把文件拷到这台机器，然后")
+            eprint("  bash dojo-install.sh          # 全新安装")
+            eprint("  dojo upgrade --file dojo-install.sh   # 已有 dojo 时升级")
+            sys.exit(1)
+        print(f"  用的是 {src}，{len(data) // 1024} KB")
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = os.path.join(STATE_DIR, "upgrade.sh")
     with open(tmp, "wb") as f:

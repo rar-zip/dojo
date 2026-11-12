@@ -656,6 +656,18 @@ class TestHookStderrPTY(unittest.TestCase):
                     buf += chunk
                 if b"TTY_NOT_OK" in buf or b"TTY_IS_OK" in buf:
                     break
+            # stderr 和 stdout 是两条道，TTY 那行先到不代表 HOOK_MARK 已经回屏幕了
+            end = time.time() + 3
+            while time.time() < end and b"HOOK_MARK" not in buf:
+                ready, _, _ = select.select([master], [], [], 0.2)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        break
+                    if not chunk:
+                        break
+                    buf += chunk
             os.write(master, b"exit\n")
         finally:
             try:
@@ -1412,6 +1424,30 @@ class TestInstallerMirrors(unittest.TestCase):
         self.assertIsNone(data)
         self.assertIn("坏源A", err)
         self.assertIn("坏源B", err)
+
+    def test_net_hint_unreachable(self):
+        m = load_module()
+        hint = m.net_hint(OSError(101, "Network is unreachable"))
+        self.assertIn("没有可用路由", hint)
+        hint = m.net_hint(OSError(111, "Connection refused"))
+        self.assertIn("连接被拒", hint)
+
+    def test_upgrade_from_local_file(self):
+        home = os.path.join(self.tmp, "uhome")
+        os.makedirs(home)
+        conf = os.path.join(self.tmp, "u.toml")
+        with open(conf, "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n')
+        script = os.path.join(self.tmp, "fake-install.sh")
+        with open(script, "w", encoding="utf-8") as f:
+            f.write("#!/usr/bin/env bash\n# dojo fake installer\necho dojo-fake-installed\n")
+        env = dict(os.environ, HOME=home, DOJO_CONFIG=conf,
+                   DOJO_STATE_DIR=os.path.join(home, "state"))
+        r = subprocess.run([sys.executable, DOJO, "upgrade", "--file", script, "--yes"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("用的是 本地文件", r.stdout)
+        self.assertIn("dojo-fake-installed", r.stdout)
 
     def test_explicit_url_wins(self):
         import http.server

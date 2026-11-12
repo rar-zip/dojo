@@ -1,5 +1,13 @@
 # 更新记录
 
+## 0.8.4
+
+- **下载优先走 IPv4**：`urlopen error [Errno 101] Network is unreachable` 多半是只解析到 AAAA 记录、机器却没有 v6 出口。现在解析时先拿 A 记录，拿不到再退回原来的行为
+- **网络错误翻成人话**：101/99 说没路由，110/60 说超时，111 提示本地代理可能挂了，DNS 失败提示看 resolver
+- **新增 `dojo upgrade --file <脚本>`**：没外网的机器可以先在别处下好 61 KB 的安装器，拷过去直接装或升级
+- README 补了离线安装一节
+- 测试 83 → 85
+
 ## 0.8.3
 
 - **安装器体积 196 KB → 61 KB**：payload 先 gzip 再 base64，装的时候 `base64 -d | gunzip`。小样本机上 `wget | bash` 快很多，断流概率也低
