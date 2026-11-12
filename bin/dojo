@@ -2258,6 +2258,7 @@ def cmd_acp(cfg, level):
             try:
                 msg = json.loads(line)
             except ValueError:
+                q.put({"__parse_error__": True})
                 continue
             if msg.get("method") == "session/cancel":
                 sid = (msg.get("params") or {}).get("sessionId")
@@ -2273,6 +2274,9 @@ def cmd_acp(cfg, level):
         msg = q.get()
         if msg is None:
             break
+        if msg.get("__parse_error__"):
+            _acp_error(None, -32700, "Parse error")
+            continue
         mid = msg.get("id")
         method = msg.get("method") or ""
         params = msg.get("params") or {}
@@ -2326,9 +2330,13 @@ def cmd_acp(cfg, level):
 
 def _fim_url(cfg):
     base = cfg["model"]["base_url"].rstrip("/")
-    if base.endswith("/v1"):
-        base = base[:-3]
-    return base + "/beta/completions"
+    raw = base
+    # 官方 DeepSeek 的 FIM 在 /beta/completions；其他 OpenAI 兼容端点用标准 /completions
+    if "deepseek.com" in raw:
+        if base.endswith("/v1"):
+            base = base[:-3]
+        return base + "/beta/completions"
+    return raw + "/completions"
 
 
 def cmd_complete(cfg, args):
@@ -2373,8 +2381,8 @@ def cmd_complete(cfg, args):
         sys.exit(2)
     payload = {
         "model": cfg["model"]["model"],
-        "prompt": prefix,
-        "suffix": suffix or "",
+        "prompt": redact_sensitive(prefix),
+        "suffix": redact_sensitive(suffix or ""),
         "max_tokens": max_tokens,
         "temperature": 0,
         "stream": False,
