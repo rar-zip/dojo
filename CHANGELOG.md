@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.8.3
+
+- **安装器体积 196 KB → 61 KB**：payload 先 gzip 再 base64，装的时候 `base64 -d | gunzip`。小样本机上 `wget | bash` 快很多，断流概率也低
+- **每个源重试 2 次**：`dojo upgrade` 每个镜像最多试两次，中间歇 1.5 秒，弱网下不至于一次抖动就判死
+- 校验：用假 HOME 跑了一遍安装器，装出来的 `dojo` 和仓库里的字节一致
+- 测试仍是 83 项
+
 ## 0.8.2
 
 - **`dojo upgrade` 多镜像自动退让**：raw.githubusercontent 国内经常连不上，现在按 GitHub raw → jsDelivr → gh-proxy → ghfast 依次重试，哪个通用哪个，并把用的源打出来

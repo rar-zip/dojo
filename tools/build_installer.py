@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """把 bin/dojo 和 shell hook 打包成可 wget|bash 的单文件安装器"""
 import base64
+import gzip
 import os
 
 HERE = os.path.dirname(os.path.realpath(__file__))
@@ -8,7 +9,7 @@ REPO = os.path.dirname(HERE)
 OUT = os.path.join(REPO, "dist", "dojo-install.sh")
 
 TEMPLATE = r'''#!/usr/bin/env bash
-# dojo 一行安装器 v0.1
+# dojo 一行安装器（payload 用 gzip 压缩后 base64，体积约为原来的 1/4）
 # 用法： wget -qO- <这个文件的地址> | bash
 set -euo pipefail
 
@@ -30,16 +31,16 @@ fi
 mkdir -p "$BIN_DIR" "$SHARE_DIR" "$CONF_DIR" "$STATE_DIR"
 chmod 700 "$STATE_DIR"
 
-base64 -d > "$BIN_DIR/dojo" <<'__DOJO_B64__'
+base64 -d <<'__DOJO_B64__' | gunzip > "$BIN_DIR/dojo"
 __DOJO_PAYLOAD__
 __DOJO_B64__
 chmod +x "$BIN_DIR/dojo"
 
-base64 -d > "$SHARE_DIR/hook.bash" <<'__HOOK_B64__'
+base64 -d <<'__HOOK_B64__' | gunzip > "$SHARE_DIR/hook.bash"
 __HOOK_PAYLOAD__
 __HOOK_B64__
 
-base64 -d > "$SHARE_DIR/hook.zsh" <<'__ZHOOK_B64__'
+base64 -d <<'__ZHOOK_B64__' | gunzip > "$SHARE_DIR/hook.zsh"
 __ZHOOK_PAYLOAD__
 __ZHOOK_B64__
 
@@ -112,9 +113,13 @@ say "然后敲 dojo doctor 自检，dojo chat 直接开聊"
 
 
 def main():
-    dojo = base64.b64encode(open(os.path.join(REPO, "bin", "dojo"), "rb").read()).decode()
-    hook = base64.b64encode(open(os.path.join(REPO, "lib", "hook.bash"), "rb").read()).decode()
-    zhook = base64.b64encode(open(os.path.join(REPO, "lib", "hook.zsh"), "rb").read()).decode()
+    def pack(path):
+        raw = open(path, "rb").read()
+        return base64.b64encode(gzip.compress(raw, 9)).decode()
+
+    dojo = pack(os.path.join(REPO, "bin", "dojo"))
+    hook = pack(os.path.join(REPO, "lib", "hook.bash"))
+    zhook = pack(os.path.join(REPO, "lib", "hook.zsh"))
     text = (
         TEMPLATE.replace("__DOJO_PAYLOAD__", dojo)
         .replace("__HOOK_PAYLOAD__", hook)

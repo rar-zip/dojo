@@ -52,6 +52,8 @@
 wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
 ```
 
+安装器本身约 61 KB（payload 用 gzip 压过，下载完 `base64 -d | gunzip` 还原），小机器和慢网也不至于断在半路。
+
 `raw.githubusercontent.com` 国内经常抽风。`dojo upgrade` 会自动按 **GitHub raw → jsDelivr → gh-proxy → ghfast** 的顺序退让重试；手动装也可以直接换源：
 
 ```bash
