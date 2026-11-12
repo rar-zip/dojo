@@ -1315,5 +1315,58 @@ class TestV070Interactive(unittest.TestCase):
         self.assertIn("__dojo_complete_widget", out)
 
 
+class TestV080Freeform(unittest.TestCase):
+    """v0.8：说话免指令，控制留短词"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dojo-v080-")
+        self.state = os.path.join(self.tmp, "state")
+        os.makedirs(self.state)
+        self.conf = os.path.join(self.tmp, "config.toml")
+        with open(self.conf, "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        self.env = dict(os.environ, HOME=self.tmp, DOJO_CONFIG=self.conf,
+                        DOJO_STATE_DIR=self.state)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_route_freeform(self):
+        from unittest import mock
+        m = load_module()
+        cfg = m.load_config()
+        with mock.patch.object(m, "last_failure", return_value={"cmd": "x", "code": 1, "cwd": "/tmp"}):
+            self.assertEqual(m.route_freeform(cfg, 3), "why")
+            # L5 直接进规划，上下文里本来就带着报错
+            self.assertEqual(m.route_freeform(cfg, 5), "do")
+        with mock.patch.object(m, "last_failure", return_value=None):
+            self.assertEqual(m.route_freeform(cfg, 3), "ask")
+            self.assertEqual(m.route_freeform(cfg, 5), "do")
+
+    def test_looks_like_typo(self):
+        m = load_module()
+        self.assertEqual(m.looks_like_typo("stauts"), "status")
+        self.assertEqual(m.looks_like_typo("histry"), "history")
+        self.assertIsNone(m.looks_like_typo("status"))
+        self.assertIsNone(m.looks_like_typo("你好"))
+        self.assertIsNone(m.looks_like_typo("80端口被谁占了"))
+
+    def test_typo_gives_hint_not_model_call(self):
+        r = subprocess.run([sys.executable, DOJO, "stauts"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("dojo status", r.stderr)
+
+    def test_log_subcommands(self):
+        r = subprocess.run([sys.executable, DOJO, "log", "err"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("最近没有失败的命令", r.stdout)
+        r = subprocess.run([sys.executable, DOJO, "log", "run"], env=self.env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("还没有运行记录", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

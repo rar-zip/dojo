@@ -7,6 +7,7 @@
   dojo                     当前状态
   dojo status              查看详细运行状态
   dojo chat                连着聊，问不清楚可以追问
+  dojo "80 端口被谁占了"    直接说人话：有报错就带上现场答，L5 出方案并逐条确认
   dojo ask "问题"           问一句就走
   dojo explain             解释上一条命令
   dojo 1 / 2 / 3           直接跑上一张报错卡片里的第 N 条方案
@@ -45,7 +46,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -2926,7 +2927,18 @@ def cmd_status(cfg):
         print(f"  {mark}  {r['cmd'][:70]}")
 
 
-def cmd_log(cfg):
+def cmd_log(cfg, args=None):
+    """dojo log [err|run|cmd]：默认看它眼里的上下文，带个词就翻对应的账。"""
+    sub = (args or [""])[0] if (args or [""]) else ""
+    if sub in ("err", "error", "errors"):
+        cmd_errors(cfg, args[1:])
+        return
+    if sub in ("run", "runs", "history"):
+        cmd_history(cfg, args[1:])
+        return
+    if sub in ("cmd", "commands"):
+        cmd_commands(cfg, args[1:])
+        return
     rows = read_ctx(int(cfg["context"]["history"]))
     if not rows:
         print("（空）")
@@ -3392,6 +3404,7 @@ def usage():
         "  dojo                     当前状态\n"
         "  dojo status              查看详细运行状态\n"
         "  dojo chat                连着聊，问不清楚可以追问\n"
+        "  dojo \"80 端口被谁占了\"    直接说人话：有报错就带上现场答，L5 出方案并逐条确认\n"
         "  dojo ask \"问题\"           问一句就走\n"
         "  dojo explain             解释上一条命令\n"
         "  dojo errors [N]          列最近的失败命令\n"
@@ -3409,12 +3422,39 @@ def usage():
         "  dojo stop [--abort]      让正在跑的任务停下（加 --abort 立即刹车）\n"
         "  dojo level [1-5]         看/切协助等级\n"
         "  dojo config [get|set]    查看或修改配置项\n"
-        "  dojo log                 看它眼里的上下文\n"
+        "  dojo log [err|run]       看它眼里的上下文；err 列失败命令，run 看运行记录\n"
         "  dojo doctor              自检\n"
         "  dojo upgrade             拉最新版装上\n"
         "  dojo init                装 shell hook\n"
         "  dojo uninstall [--purge] 干净卸载 dojo\n"
     )
+
+
+KNOWN_COMMANDS = (
+    "status", "ask", "chat", "c", "explain", "run", "do", "exec", "sh", "preview", "try",
+    "undo", "errors", "err", "diff", "why", "fix", "acp", "complete", "fim", "history",
+    "runs", "commands", "stop", "level", "config", "log", "doctor", "upgrade", "update",
+    "init", "uninstall", "help", "version",
+)
+
+
+def looks_like_typo(word):
+    """单个英文小词又跟子命令长得很像时，给个提示，别把 `dojo stauts` 当成人话发出去。"""
+    if not re.fullmatch(r"[a-z][a-z0-9_-]{0,17}", word or ""):
+        return None
+    import difflib
+    hit = difflib.get_close_matches(word, KNOWN_COMMANDS, n=1, cutoff=0.78)
+    return hit[0] if hit and hit[0] != word else None
+
+
+def route_freeform(cfg, level):
+    """没匹配到子命令时，这句话该走哪条路：why / do / ask。"""
+    failed = last_failure()
+    if failed is not None and level < 5:
+        return "why"
+    if level >= 5:
+        return "do"
+    return "ask"
 
 
 def main():
@@ -3491,7 +3531,7 @@ def main():
     elif cmd == "config":
         cmd_config(cfg, args[1:])
     elif cmd == "log":
-        cmd_log(cfg)
+        cmd_log(cfg, args[1:])
     elif cmd == "doctor":
         cmd_doctor(cfg)
     elif cmd in ("upgrade", "update"):
@@ -3505,8 +3545,23 @@ def main():
     elif cmd in ("-h", "--help", "help"):
         usage()
     else:
-        usage()
-        sys.exit(1)
+        # 没匹配到子命令：整串参数当成你对老王说的话
+        typo = looks_like_typo(args[0]) if len(args) == 1 else None
+        if typo:
+            eprint(f"没有 `dojo {args[0]}` 这个子命令，你是不是想 `dojo {typo}`？")
+            eprint("想直接说话就写成一句话，比如 dojo \"80 端口被谁占了\"")
+            sys.exit(1)
+        text = " ".join(args).strip()
+        if not text:
+            usage()
+            sys.exit(1)
+        route = route_freeform(cfg, level)
+        if route == "why":
+            cmd_why(cfg, args, level)
+        elif route == "do":
+            cmd_do(cfg, args, level, yes="--yes" in args)
+        else:
+            cmd_ask(cfg, args, level)
 
 
 if __name__ == "__main__":

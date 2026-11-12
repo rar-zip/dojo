@@ -74,11 +74,20 @@ dojo uninstall         # 移除二进制软链与 Shell Hook 配置块
 dojo uninstall --purge # 彻底卸载并清除 ~/.config/dojo 与 ~/.local/state/dojo 全部数据
 ```
 
+## 日常只需要记三件事
+
+1. 报错了：空敲 **`dojo`**
+2. 有事找它：直接 **`dojo 你想说的话`**，不用管是 `ask`、`why` 还是 `run`
+3. 跑坏了想撤：**`dojo undo`**
+
+`undo` / `stop` / `exec` / `preview` 这几个永远不吃自然语言，必须是明确子命令：救命和撤销要毫秒级确定性，字面命令要原样执行，都不能让模型猜。
+
 ## 命令速查手册
 
 | 命令格式 | 功能说明 | 权限要求 |
 | :--- | :--- | :--- |
 | `dojo` | **智能入口**：若上一条命令失败（1 小时内）则直接诊断报错；否则展示当前状态摘要 | 只读 |
+| `dojo "80 端口被谁占了"` | **直接说人话**：没匹配到子命令时整串当对话。最近有报错就带上现场答，L5 出方案并逐条确认，其余按当前等级作答 | 随等级 |
 | `dojo 1` / `2` / `3` | **方案选号执行**：直接跑上一张报错卡片里的第 N 条方案 | 需 **L5** |
 | `dojo diff [ID]` | **回滚前预览**：对比指定运行（默认最近一次）的快照与当前工作区，打印 unified diff | 只读 |
 | `dojo status` | 强制查看版本、协助等级、模型配置、沙盒可用性及最近命令记录 | 只读 |
@@ -98,7 +107,7 @@ dojo uninstall --purge # 彻底卸载并清除 ~/.config/dojo 与 ~/.local/state
 | `dojo config [get\|set]` | 查看脱敏后的全量配置，或读写指定配置项（如 `dojo config set context.auto_explain false`） | 配置修改 |
 | `dojo complete -p "前缀"` | 调用 FIM 接口补全命令或代码片段（支持 `-s "后缀"` 或通过 `stdin` 以 `\0` 分隔传入前后文） | 只读 |
 | `dojo acp` | 以 ACP（Agent Control Protocol）stdio JSON-RPC 2.0 模式启动，供编辑器作为只读 AI 后端接入 | 只读 |
-| `dojo log` | 查看 `dojo` 当前感知到的终端命令上下文、上一条 `stderr` 及最近一次代跑输出尾部 | 只读 |
+| `dojo log [err\|run]` | 查看它眼里的上下文；`err` 列失败命令，`run` 看运行记录（老命令 `errors` / `history` / `commands` 仍可用） | 只读 |
 | `dojo doctor` | 检查 Python 版本、配置文件、API Key、Shell Hook 注入状态及快照目录写权限 | 只读 |
 
 ## 核心工作流详解
@@ -305,10 +314,12 @@ python3 tools/build_installer.py
 - [x] P6 ACP 编辑器接入、FIM 补全
 - [x] v0.7 交互手感闭环：`dojo 1/2/3` 选号执行、`dojo diff`、Ctrl-G 行内补全
 
+- [x] v0.8 入口收口：说话免指令（`dojo 80端口被谁占了` 直接用），`dojo log` 收拢历史入口，子命令写错给提示
+
 接下来，不往重型全自动 Agent 方向膨胀，守住「你是司机、它是副驾，零第三方依赖、无常驻进程」：
 
-- **v0.8 快照与沙盒双网合一**：静态猜不准影响面时主动提议进沙盒；沙盒应用改动前自动转存为标准快照，应用完也能 `dojo undo`
-- **v0.9 视野精准扩展**：ACP 模式下共享终端报错现场；报错里出现本地文件行号时，受控摘取上下几行（脱敏、排除 deny_paths）
+- **v0.9 快照与沙盒双网合一**：静态猜不准影响面时主动提议进沙盒；沙盒应用改动前自动转存为标准快照，应用完也能 `dojo undo`
+- **v0.10 视野精准扩展**：ACP 模式下共享终端报错现场；报错里出现本地文件行号时，受控摘取上下几行（脱敏、排除 deny_paths）
 - **v1.0 工程结构升级**：开发态拆到 `src/dojo/`，分发态仍由构建脚本拼成单文件，对外还是 `wget | bash`
 
 细节在 [docs/路线图-v0.7-v1.0.md](docs/路线图-v0.7-v1.0.md)。
