@@ -46,7 +46,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -3401,32 +3401,26 @@ def quickstart(cfg):
 def usage():
     print(
         f"dojo {VERSION} —— 本机 Linux 陪练\n\n"
-        "  dojo                     当前状态\n"
-        "  dojo status              查看详细运行状态\n"
+        "说话（不用记子命令）\n"
+        "  dojo                     上一条挂了就说为什么，没挂就看状态\n"
+        "  dojo \"80 端口被谁占了\"    直接说人话，按当前等级作答\n"
         "  dojo chat                连着聊，问不清楚可以追问\n"
-        "  dojo \"80 端口被谁占了\"    直接说人话：有报错就带上现场答，L5 出方案并逐条确认\n"
-        "  dojo ask \"问题\"           问一句就走\n"
-        "  dojo explain             解释上一条命令\n"
-        "  dojo errors [N]          列最近的失败命令\n"
-        "  dojo why \"我其实想…\"      报错方案都不对时，按目的重新给做法\n"
-        "  dojo 1 / 2 / 3           直接跑上一张报错卡片里的第 N 条方案\n"
-        "  dojo diff [ID]           撤之前先看清改了哪几行\n"
-        "  dojo acp                 以 ACP agent 方式跑（stdio），给编辑器接\n"
-        "  dojo complete -p \"…\"     FIM 补全，只输出补出来的那一段\n"
-        "  dojo run \"想做的事\"        说人话，它出方案并逐步执行（L5）\n"
-        "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
-        "  dojo preview \"命令\"        在沙盒里先跑一遍，看完再决定应用还是丢弃\n"
+        "  dojo why \"我其实想…\"      方案不对时，按目的重算\n"
+        "  dojo 1 / 2 / 3           跑上一张报错卡片的第 N 条方案\n\n"
+        "控制（不让模型猜）\n"
+        "  dojo level [1-5]         看/切协助等级，默认 L3\n"
         "  dojo undo [ID] [N|all]   回滚最近或指定的运行\n"
-        "  dojo history [N]         看运行记录\n"
-        "  dojo commands [N]        看代跑过的命令（统一日志）\n"
-        "  dojo stop [--abort]      让正在跑的任务停下（加 --abort 立即刹车）\n"
-        "  dojo level [1-5]         看/切协助等级\n"
-        "  dojo config [get|set]    查看或修改配置项\n"
-        "  dojo log [err|run]       看它眼里的上下文；err 列失败命令，run 看运行记录\n"
+        "  dojo stop [--abort]      让正在跑的任务停下\n"
+        "  dojo exec \"命令\"           直接跑一条字面命令（要 L5）\n"
+        "  dojo preview \"命令\"        沙盒里先跑一遍（要 L5）\n\n"
+        "查账与管理\n"
+        "  dojo log [err|run]       上下文 / 失败命令 / 运行记录\n"
+        "  dojo diff [ID]           撤之前先看清改了哪几行\n"
+        "  dojo status              详细运行状态\n"
         "  dojo doctor              自检\n"
-        "  dojo upgrade             拉最新版装上\n"
-        "  dojo init                装 shell hook\n"
-        "  dojo uninstall [--purge] 干净卸载 dojo\n"
+        "  dojo config [get|set]    查看或修改配置项\n"
+        "  dojo acp | complete      编辑器接入 / FIM 补全\n"
+        "  dojo init | upgrade | uninstall\n"
     )
 
 
