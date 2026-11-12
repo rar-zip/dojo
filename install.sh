@@ -54,7 +54,7 @@ level = 3
 
 [context]
 history = 8
-capture_stderr = false
+capture_stderr = true
 
 [exec]
 max_snapshot_mb = 200

@@ -639,7 +639,8 @@ class TestHookStderrPTY(unittest.TestCase):
         buf = b""
         try:
             time.sleep(1.0)
-            os.write(master, b"echo HOOK_MARK >&2; [ -t 2 ] && echo IS_TTY2 || echo NOT_TTY2\n")
+            # 拆成两段拼接，回显里不会出现完整字样，免得把回显当成输出
+            os.write(master, b'echo HOOK_MARK >&2; [ -t 2 ] && echo "TTY_""IS_OK" || echo "TTY_""NOT_OK"\n')
             end = time.time() + 8
             while time.time() < end:
                 ready, _, _ = select.select([master], [], [], 0.2)
@@ -651,7 +652,7 @@ class TestHookStderrPTY(unittest.TestCase):
                     if not chunk:
                         break
                     buf += chunk
-                if b"NOT_TTY2" in buf or b"IS_TTY2" in buf:
+                if b"TTY_NOT_OK" in buf or b"TTY_IS_OK" in buf:
                     break
             os.write(master, b"exit\n")
         finally:
@@ -660,8 +661,12 @@ class TestHookStderrPTY(unittest.TestCase):
             except OSError:
                 pass
         out = buf.decode("utf-8", "replace")
-        self.assertIn("IS_TTY2", out)
-        self.assertNotIn("NOT_TTY2", out)
+        # 回显把整条命令也打到屏幕上了，所以按行比对，别被回显里的字样骗了
+        lines = [ln.strip() for ln in out.splitlines()]
+        self.assertIn("TTY_IS_OK", lines)
+        self.assertNotIn("TTY_NOT_OK", lines)
+        # 只进日志不算数：stderr 必须同时回到终端屏幕上
+        self.assertIn("HOOK_MARK", out)
         log = os.path.join(self.home, ".local", "state", "dojo", "stderr.log")
         end = time.time() + 3
         while time.time() < end and not (os.path.exists(log) and "HOOK_MARK" in readfile(log)):
@@ -1008,6 +1013,103 @@ class TestAcpAndFim(unittest.TestCase):
                            input="", capture_output=True, text=True, timeout=30)
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("用法", r.stderr)
+
+
+class TestV061Regressions(unittest.TestCase):
+    """v0.6.1 修的六个真问题，每条都留一份回归"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dojo-v061-")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_sudo_wrap_stays_irreversible(self):
+        m = load_module()
+        wrapped = m._sudo_wrap("apt install -y nginx")
+        self.assertEqual(m.classify(wrapped), "irreversible")
+        self.assertTrue(any("apt remove nginx" in h for h in m.suggest_inverse(wrapped)))
+
+    def test_shell_c_payload_unwrapped(self):
+        m = load_module()
+        self.assertEqual(m._shell_c_payload(["bash", "-c", "ls -l"]), "ls -l")
+        self.assertIsNone(m._shell_c_payload(["bash"]))
+        name, args = m._cmd_args(["sudo", "--", "bash", "--noprofile", "-c", "apt install -y nginx"])
+        self.assertEqual(name, "apt")
+        self.assertEqual(args, ["install", "-y", "nginx"])
+
+    def test_commands_log_follows_state_dir_and_redacts(self):
+        state = os.path.join(self.tmp, "state")
+        os.environ["DOJO_STATE_DIR"] = state
+        try:
+            m = load_module()
+            m._refresh_paths()
+            self.assertEqual(m.COMMANDS_LOG, os.path.join(state, "commands.log"))
+            m.log_command("r1", 1, 1, 'curl -H "Authorization: Bearer sk-abcdef123" https://x', 0)
+            text = readfile(m.COMMANDS_LOG)
+            self.assertIn("run=r1", text)
+            self.assertNotIn("sk-abcdef123", text)
+        finally:
+            os.environ.pop("DOJO_STATE_DIR", None)
+
+    def test_apply_upper_file_to_dir(self):
+        root = os.path.join(self.tmp, "root")
+        upper = os.path.join(self.tmp, "upper")
+        os.makedirs(root)
+        os.makedirs(os.path.join(upper, "sub"))
+        with open(os.path.join(root, "sub"), "w", encoding="utf-8") as f:
+            f.write("old file")
+        with open(os.path.join(upper, "sub", "a.txt"), "w", encoding="utf-8") as f:
+            f.write("inner")
+        m = load_module()
+        m._apply_upper(upper, root)
+        self.assertTrue(os.path.isdir(os.path.join(root, "sub")))
+        self.assertEqual(readfile(os.path.join(root, "sub", "a.txt")), "inner")
+
+    def test_preview_exit_code_propagates(self):
+        home = os.path.join(self.tmp, "home")
+        conf = os.path.join(home, ".config", "dojo")
+        os.makedirs(conf)
+        with open(os.path.join(conf, "config.toml"), "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        env = dict(os.environ, HOME=home, DOJO_CONFIG=os.path.join(conf, "config.toml"),
+                   DOJO_STATE_DIR=os.path.join(home, "state"))
+        r = subprocess.run([sys.executable, DOJO, "preview", "ls"], env=env,
+                           capture_output=True, text=True, timeout=60)
+        self.assertEqual(r.returncode, 1)
+
+    def test_acp_parse_error_and_cancel_reply(self):
+        import json
+        home = os.path.join(self.tmp, "acphome")
+        conf = os.path.join(home, ".config", "dojo")
+        os.makedirs(conf)
+        with open(os.path.join(conf, "config.toml"), "w", encoding="utf-8") as f:
+            f.write('[model]\napi_key = "test"\nstream = false\n[assist]\nlevel = 3\n')
+        env = dict(os.environ, HOME=home, DOJO_CONFIG=os.path.join(conf, "config.toml"),
+                   DOJO_STATE_DIR=os.path.join(home, "state"))
+        p = subprocess.Popen([sys.executable, DOJO, "acp"], stdin=subprocess.PIPE,
+                             stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             env=env, text=True, bufsize=1)
+        try:
+            p.stdin.write("这不是 JSON\n")
+            p.stdin.flush()
+            bad = json.loads(p.stdout.readline())
+            self.assertEqual(bad["error"]["code"], -32700)
+            p.stdin.write(json.dumps({"jsonrpc": "2.0", "id": 7,
+                                      "method": "session/cancel",
+                                      "params": {"sessionId": "nope"}}) + "\n")
+            p.stdin.flush()
+            cancel = json.loads(p.stdout.readline())
+            self.assertEqual(cancel["id"], 7)
+            self.assertEqual(cancel["result"], {})
+        finally:
+            p.stdin.close()
+            p.wait(timeout=10)
+
+    def test_fim_url_non_deepseek(self):
+        m = load_module()
+        cfg = {"model": {"base_url": "https://openrouter.ai/api/v1"}}
+        self.assertEqual(m._fim_url(cfg), "https://openrouter.ai/api/v1/completions")
 
 
 if __name__ == "__main__":

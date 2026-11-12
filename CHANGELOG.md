@@ -1,5 +1,18 @@
 # 更新记录
 
+## 0.6.1
+
+六个真问题，全部有复现路径：
+
+- **修 hook 吞掉整个终端**（致命）：hook 里先 `setsid()` 再去 `open("/dev/tty")`，脱离控制终端后必然 ENXIO，转发进程拿不到 tty，只把数据写进 `stderr.log`。结果是开了 `capture_stderr` 之后提示符、打字回显、所有报错在屏幕上一个都看不到。改成 fork 前先抓住终端（拿不到就 `dup(2)` 兜底），并关掉内层 PTY 的 `OPOST`，避免 `\n` 被转义两次变成 `\r\r\n`
+- **提权后命令判错可逆**（高危）：`_sudo_wrap()` 把命令包成 `sudo -- bash -c '...'`，`classify()` 只看到 `bash`，`apt install` 这类被判成可逆，`dojo undo` 也给不出反向命令。新增 `_shell_c_payload()`，`_cmd_args()` 现在穿透 `sudo [--] bash/sh/zsh -c`
+- **代跑命令日志污染真实目录且未脱敏**（高危）：`COMMANDS_LOG` 没进 `_refresh_paths()` 的 global 列表，`DOJO_STATE_DIR` 换了它不跟着换，测试里的假命令会写进真实 `~/.local/state/dojo/commands.log`；`log_command()` 也直接落原始命令。现在跟着刷新，并按 `safety.redact_secrets` 脱敏
+- **`dojo preview` 退出码恒为 0**（中危）：`main()` 没接 `cmd_preview()` 的返回值，被 L3 拦下（1）或被策略拦下（2）都返回 0，脚本里没法判断
+- **沙盒合并 `rm f && mkdir f` 崩溃**（中危）：`_apply_upper()` 对目录直接 `makedirs(exist_ok=True)`，真实路径上还是同名普通文件时抛 `FileExistsError`；现在先让路
+- **ACP/FIM 三处细节**：`_fim_url()` 只在 deepseek.com 下才拼 `/beta/completions`，其他兼容端点用 `/completions`；`cmd_complete` 的 prefix/suffix 走 `redact_sensitive`；`cmd_acp` 对坏 JSON 回 `-32700`，对带 id 的 `session/cancel` 补回 `{}`
+- 配置一致性：`install.sh` 的 `capture_stderr` 改成 `true`，跟 CHANGELOG 和内置默认值对齐；hook 改为「只要没显式写 false 就开」，并支持 `DOJO_CONFIG`
+- 测试 61 → 68，`python3 -W error tests/test_core.py` 零警告
+
 ## 0.6.0
 
 - **空敲 `dojo` 直接答报错**：上一条命令失败（退出码非 0、一小时内）时，不再打印状态，直接让老王说为什么挂、先看哪里、怎么修

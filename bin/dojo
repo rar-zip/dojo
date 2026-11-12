@@ -43,7 +43,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.6.0"
+VERSION = "0.6.1"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -60,7 +60,7 @@ _RUN_SEQ = itertools.count(1)
 
 def _refresh_paths():
     """根据当前环境变量动态刷新路径，便于测试隔离与运行时切换。"""
-    global CONFIG_PATH, STATE_DIR, CTX_PATH, ERR_PATH, RUNS_DIR, HALT_PATH, ACTIVE_PATH, CHAT_PATH
+    global CONFIG_PATH, STATE_DIR, CTX_PATH, ERR_PATH, RUNS_DIR, HALT_PATH, ACTIVE_PATH, CHAT_PATH, COMMANDS_LOG
     CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
     STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
     CTX_PATH = os.path.join(STATE_DIR, "ctx.tsv")
@@ -69,6 +69,7 @@ def _refresh_paths():
     HALT_PATH = os.path.join(STATE_DIR, "halt")
     ACTIVE_PATH = os.path.join(STATE_DIR, "active.json")
     CHAT_PATH = os.path.join(STATE_DIR, "chat.json")
+    COMMANDS_LOG = os.path.join(STATE_DIR, "commands.log")
 
 
 DEFAULTS = {
@@ -594,6 +595,14 @@ def unwrap(tokens):
     return name
 
 
+def _shell_c_payload(tokens):
+    """从 [bash -c 'x'] 这类片段里取出 'x'；没有 -c 就返回 None。"""
+    for k, tok in enumerate(tokens):
+        if tok == "-c" and k + 1 < len(tokens):
+            return tokens[k + 1]
+    return None
+
+
 def _cmd_args(tokens):
     """返回 (命令名, 参数列表)，跳过前导环境变量赋值与 sudo/env/time 等包装器。"""
     i = 0
@@ -610,6 +619,16 @@ def _cmd_args(tokens):
                     i += 2
                 else:
                     i += 1
+            # sudo -- bash -c '真正要跑的东西'：穿透到底层命令
+            if i < n and os.path.basename(tokens[i]) in ("bash", "sh", "zsh", "dash", "ksh"):
+                inner = _shell_c_payload(tokens[i:])
+                if inner is not None:
+                    try:
+                        tokens = shlex.split(inner)
+                    except ValueError:
+                        return os.path.basename(tokens[i]), tokens[i + 1:]
+                    i, n = 0, len(tokens)
+                    continue
             continue
         if t in ("env", "command", "exec", "nohup", "time", "nice", "ionice", "stdbuf"):
             i += 1
@@ -1797,7 +1816,7 @@ class Runner:
             run.add_step(cmd, kind, snap, rc, cwd=self.cwd)
             if escalated:
                 run.data["steps"][-1]["escalated"] = True
-            log_command(run.id, i, len(cmds), cmd, rc)
+            log_command(run.id, i, len(cmds), cmd, rc, redact=do_redact)
             run.data["steps"][-1]["coarse"] = snap.coarse
             run.data["steps"][-1]["unsupported"] = snap.unsupported
             run.save()
@@ -1882,6 +1901,12 @@ def _apply_upper(upper, root):
     for kind, rel in sorted([i for i in items if i[0] == "目录"], key=lambda x: depth(x[1])):
         src = os.path.join(upper, rel)
         target = os.path.join(root, rel)
+        # 沙盒里可能是 rm f && mkdir f：真实路径上还是同名普通文件/软链，先让路
+        if os.path.lexists(target) and not os.path.isdir(target):
+            try:
+                os.unlink(target)
+            except OSError:
+                pass
         os.makedirs(target, exist_ok=True)
         try:
             shutil.copystat(src, target, follow_symlinks=False)
@@ -2264,6 +2289,8 @@ def cmd_acp(cfg, level):
                 sid = (msg.get("params") or {}).get("sessionId")
                 if sid in events:
                     events[sid].set()
+                if msg.get("id") is not None:
+                    q.put({"__cancel_reply__": msg.get("id")})
                 continue
             q.put(msg)
         q.put(None)
@@ -2276,6 +2303,9 @@ def cmd_acp(cfg, level):
             break
         if msg.get("__parse_error__"):
             _acp_error(None, -32700, "Parse error")
+            continue
+        if "__cancel_reply__" in msg:
+            _acp_reply(msg["__cancel_reply__"], {})
             continue
         mid = msg.get("id")
         method = msg.get("method") or ""
@@ -2866,12 +2896,14 @@ def _active_run():
     return data
 
 
-def log_command(run_id, step, total, cmd, rc):
+def log_command(run_id, step, total, cmd, rc, redact=True):
     """所有代跑过的命令统一记到一处"""
     try:
+        _refresh_paths()
         os.makedirs(STATE_DIR, exist_ok=True)
         line = "%s  run=%s  #%d/%d  rc=%s  %s\n" % (
-            time.strftime("%Y-%m-%d %H:%M:%S"), run_id, step, total, rc, cmd)
+            time.strftime("%Y-%m-%d %H:%M:%S"), run_id, step, total, rc,
+            redact_sensitive(cmd, enabled=redact))
         with open(COMMANDS_LOG, "a") as f:
             f.write(line)
         os.chmod(COMMANDS_LOG, 0o600)
@@ -3281,11 +3313,13 @@ def main():
     elif cmd in ("exec", "sh"):
         cmd_run(cfg, args[1:], level, yes="--yes" in args)
     elif cmd in ("preview", "try"):
-        cmd_preview(
+        rc = cmd_preview(
             cfg, args[1:], level,
             yes="--yes" in args,
             apply=("--apply" in args) and ("--discard" not in args),
         )
+        if rc:
+            sys.exit(rc)
     elif cmd == "undo":
         cmd_undo(cfg, args[1:])
     elif cmd in ("errors", "err"):
