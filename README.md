@@ -331,7 +331,7 @@ L5 代跑过的每一条命令都会追加到 `~/.local/state/dojo/commands.log`
 ## 开发
 
 ```bash
-python3 tests/test_core.py     # 14 个用例：解析 / 快照 / 回滚 / CLI
+python3 -W error tests/test_core.py   # 76 个用例：解析 / 快照 / 回滚 / CLI / ACP / hook
 python3 tools/build_installer.py   # 生成 dist/dojo-install.sh
 ```
 
@@ -345,16 +345,28 @@ install.sh            源码安装
 tools/build_installer.py  打一行安装器
 tests/test_core.py    回归测试
 docs/技术方案.md       设计与「停」的语义
+docs/路线图-v0.7-v1.0.md  接下来几版怎么走
 ```
 
 ## 路线
 
+已经落地的：
+
 - [x] P1 只看只说，流式回答
 - [x] P2 L5 代跑，一步一确认，Ctrl+C 刹车
 - [x] P3 快照 / undo / 系统级操作分级
-- [ ] 更聪明的快照（按命令影响面推断，而不是关键词）
-- [ ] 会话内记忆与多轮任务
-- [ ] 更多模型后端
+- [x] P4 PTY 报错捕获、空敲直答（原因 / 猜测 / 方案）
+- [x] P5 OverlayFS 沙盒预演
+- [x] P6 ACP 编辑器接入、FIM 补全
+- [x] v0.7 交互手感闭环：`dojo 1/2/3` 选号执行、`dojo diff`、Ctrl-G 行内补全
+
+接下来，不往重型全自动 Agent 方向膨胀，守住「你是司机、它是副驾，零第三方依赖、无常驻进程」：
+
+- **v0.8 快照与沙盒双网合一**：静态猜不准影响面时主动提议进沙盒；沙盒应用改动前自动转存为标准快照，应用完也能 `dojo undo`
+- **v0.9 视野精准扩展**：ACP 模式下共享终端报错现场；报错里出现本地文件行号时，受控摘取上下几行（脱敏、排除 deny_paths）
+- **v1.0 工程结构升级**：开发态拆到 `src/dojo/`，分发态仍由构建脚本拼成单文件，对外还是 `wget | bash`
+
+细节在 [docs/路线图-v0.7-v1.0.md](docs/路线图-v0.7-v1.0.md)。
 
 ## License
 
