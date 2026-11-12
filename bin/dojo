@@ -46,7 +46,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.1"
+VERSION = "0.8.2"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -3224,6 +3224,30 @@ UPDATE_URL = os.environ.get(
     "https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh",
 )
 
+# 国内拉 raw.githubusercontent 经常抽风，按顺序退让；DOJO_INSTALL_URL 优先
+INSTALL_MIRRORS = (
+    ("GitHub raw", "https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
+    ("jsDelivr", "https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh"),
+    ("gh-proxy", "https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
+    ("ghfast", "https://ghfast.top/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
+)
+
+
+def fetch_installer(explicit=None, timeout=20):
+    """依次试几个源，返回 (脚本字节, 用的源)；全挂返回 (None, 错误摘要)。"""
+    cands = [("DOJO_INSTALL_URL", explicit)] if explicit else list(INSTALL_MIRRORS)
+    errs = []
+    for label, url in cands:
+        try:
+            data = download_with_progress(url, timeout=timeout)
+        except Exception as e:  # noqa: BLE001 网络问题什么都有
+            errs.append(f"{label} 不通（{type(e).__name__}）")
+            continue
+        if b"dojo" in data[:3000]:
+            return data, label
+        errs.append(f"{label} 内容不对")
+    return None, "；".join(errs) or "没有可用源"
+
 
 def download_with_progress(url, timeout=30):
     req = urllib.request.Request(url, headers={"User-Agent": "dojo/%s" % VERSION})
@@ -3254,17 +3278,15 @@ def download_with_progress(url, timeout=30):
 def cmd_upgrade(args):
     _refresh_paths()
     yes = "--yes" in args
-    url = os.environ.get("DOJO_INSTALL_URL", UPDATE_URL)
-    print(f"从 {url} 拉最新版")
-    try:
-        data = download_with_progress(url)
-    except Exception as e:
-        eprint(f"拉不下来：{e}")
-        eprint("网络不通的话，手动重跑安装脚本，或者源码目录里 git pull 再 ./install.sh")
+    explicit = os.environ.get("DOJO_INSTALL_URL")
+    print("拉最新版" if explicit else "拉最新版（raw 不通会自动换镜像）")
+    data, src = fetch_installer(explicit)
+    if data is None:
+        eprint(f"拉不下来：{src}")
+        eprint("换个网、开代理，或者源码目录里 git pull 再 ./install.sh")
+        eprint("也可以自己指定：DOJO_INSTALL_URL=<镜像地址> dojo upgrade")
         sys.exit(1)
-    if b"dojo" not in data[:3000]:
-        eprint("下载回来的东西不像安装脚本，先不动")
-        sys.exit(1)
+    print(f"  用的是 {src}，{len(data) // 1024} KB")
     os.makedirs(STATE_DIR, exist_ok=True)
     tmp = os.path.join(STATE_DIR, "upgrade.sh")
     with open(tmp, "wb") as f:

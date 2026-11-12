@@ -52,6 +52,18 @@
 wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
 ```
 
+`raw.githubusercontent.com` 国内经常抽风。`dojo upgrade` 会自动按 **GitHub raw → jsDelivr → gh-proxy → ghfast** 的顺序退让重试；手动装也可以直接换源：
+
+```bash
+# jsDelivr
+wget -qO- https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh | bash
+
+# gh-proxy
+wget -qO- https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
+```
+
+想钉死某个源：`DOJO_INSTALL_URL=<地址> dojo upgrade`
+
 ### 方式二：源码安装
 
 ```bash
@@ -121,7 +133,7 @@ dojo uninstall --purge # 彻底卸载并清除 ~/.config/dojo 与 ~/.local/state
 | `dojo config [get\|set]` | 查看脱敏配置，或读写指定项 | 配置修改 |
 | `dojo acp` | ACP stdio 后端，给 Zed 等编辑器接 | 只读 |
 | `dojo complete -p "前缀"` | FIM 补全，支持 `-s "后缀"` 或 stdin 以 `\0` 分隔 | 只读 |
-| `dojo init` / `upgrade` / `uninstall [--purge]` | 装 hook / 升级 / 卸载 | 本机 |
+| `dojo init` / `upgrade` / `uninstall [--purge]` | 装 hook / 升级（多镜像自动退让）/ 卸载 | 本机 |
 
 老的 `errors`、`history`、`commands`、`runs`、`err`、`fix`、`sh`、`try`、`fim`、`c` 都还能用，只是不再出现在帮助里。
 

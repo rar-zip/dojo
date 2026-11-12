@@ -1368,5 +1368,72 @@ class TestV080Freeform(unittest.TestCase):
         self.assertIn("还没有运行记录", r.stdout)
 
 
+class TestInstallerMirrors(unittest.TestCase):
+    """拉安装器的多源退让"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="dojo-mirror-")
+        self.dir = os.path.join(self.tmp, "srv")
+        os.makedirs(self.dir)
+        with open(os.path.join(self.dir, "install.sh"), "wb") as f:
+            f.write(b"#!/usr/bin/env bash\n# dojo installer\necho dojo\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_falls_back_to_second_mirror(self):
+        import http.server
+        import threading
+        from unittest import mock
+
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(  # noqa: E731
+            *a, directory=self.dir, **kw)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        good = "http://127.0.0.1:%d/install.sh" % srv.server_address[1]
+        try:
+            m = load_module()
+            with mock.patch.object(m, "INSTALL_MIRRORS",
+                                   (("坏源", "http://127.0.0.1:1/install.sh"), ("好源", good))):
+                data, src = m.fetch_installer(timeout=5)
+            self.assertIsNotNone(data)
+            self.assertEqual(src, "好源")
+            self.assertIn(b"dojo", data)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+    def test_all_broken_reports_reason(self):
+        from unittest import mock
+        m = load_module()
+        with mock.patch.object(m, "INSTALL_MIRRORS",
+                               (("坏源A", "http://127.0.0.1:1/a"), ("坏源B", "http://127.0.0.1:2/b"))):
+            data, err = m.fetch_installer(timeout=3)
+        self.assertIsNone(data)
+        self.assertIn("坏源A", err)
+        self.assertIn("坏源B", err)
+
+    def test_explicit_url_wins(self):
+        import http.server
+        import threading
+        from unittest import mock
+
+        handler = lambda *a, **kw: http.server.SimpleHTTPRequestHandler(  # noqa: E731
+            *a, directory=self.dir, **kw)
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+        good = "http://127.0.0.1:%d/install.sh" % srv.server_address[1]
+        try:
+            m = load_module()
+            with mock.patch.object(m, "INSTALL_MIRRORS",
+                                   (("镜像", "http://127.0.0.1:1/install.sh"),)):
+                data, src = m.fetch_installer(explicit=good, timeout=5)
+            self.assertEqual(src, "DOJO_INSTALL_URL")
+            self.assertIn(b"dojo", data)
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

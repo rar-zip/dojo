@@ -1,5 +1,12 @@
 # 更新记录
 
+## 0.8.2
+
+- **`dojo upgrade` 多镜像自动退让**：raw.githubusercontent 国内经常连不上，现在按 GitHub raw → jsDelivr → gh-proxy → ghfast 依次重试，哪个通用哪个，并把用的源打出来
+- **全部不通时给具体原因和人话建议**：每个源失败原因都列出来，提示换网 / 开代理 / `git pull` 重装，或者用 `DOJO_INSTALL_URL=<地址> dojo upgrade` 钉死某个源
+- README 补了手动换源的写法
+- 测试 80 → 83（多源退让、全挂、显式指定各一条）
+
 ## 0.8.1
 
 v0.8.0 收口没做完的两处，补上。
