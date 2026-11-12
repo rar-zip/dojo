@@ -47,7 +47,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.4"
+VERSION = "0.8.5"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))
@@ -3228,9 +3228,10 @@ UPDATE_URL = os.environ.get(
 # 国内拉 raw.githubusercontent 经常抽风，按顺序退让；DOJO_INSTALL_URL 优先
 INSTALL_MIRRORS = (
     ("GitHub raw", "https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
-    ("jsDelivr", "https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh"),
     ("gh-proxy", "https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
     ("ghfast", "https://ghfast.top/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh"),
+    # jsDelivr 会缓存 @main，刚发版时可能还是旧包，放最后
+    ("jsDelivr", "https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh"),
 )
 
 

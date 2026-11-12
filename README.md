@@ -52,16 +52,18 @@
 wget -qO- https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
 ```
 
+（jsDelivr 会缓存 `@main`，刚发版时可能还是旧包，所以放在最后；gh-proxy / ghfast 是透传，始终最新。）
+
 安装器本身约 61 KB（payload 用 gzip 压过，下载完 `base64 -d | gunzip` 还原），小机器和慢网也不至于断在半路。
 
-`raw.githubusercontent.com` 国内经常抽风。`dojo upgrade` 会自动按 **GitHub raw → jsDelivr → gh-proxy → ghfast** 的顺序退让重试；手动装也可以直接换源：
+`raw.githubusercontent.com` 国内经常抽风。`dojo upgrade` 会自动按 **GitHub raw → gh-proxy → ghfast → jsDelivr** 的顺序退让重试；手动装也可以直接换源：
 
 ```bash
-# jsDelivr
-wget -qO- https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh | bash
-
 # gh-proxy
 wget -qO- https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
+
+# ghfast
+wget -qO- https://ghfast.top/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh | bash
 ```
 
 想钉死某个源：`DOJO_INSTALL_URL=<地址> dojo upgrade`
@@ -72,7 +74,7 @@ wget -qO- https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/ma
 
 ```bash
 # 联网机器
-wget -qO dojo-install.sh https://cdn.jsdelivr.net/gh/rar-zip/dojo@main/dist/dojo-install.sh
+wget -qO dojo-install.sh https://gh-proxy.com/https://raw.githubusercontent.com/rar-zip/dojo/main/dist/dojo-install.sh
 
 # 拷到目标机器后
 bash dojo-install.sh                      # 全新安装

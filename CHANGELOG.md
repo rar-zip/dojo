@@ -1,5 +1,11 @@
 # 更新记录
 
+## 0.8.5
+
+- **镜像顺序调整**：jsDelivr 会缓存 `@main`，刚发版时仍吐旧包（purge 也不一定立刻生效）。顺序改成 raw → gh-proxy → ghfast → jsDelivr，把可能过期的源放最后
+- README 的手动换源示例也换成 gh-proxy / ghfast
+- `dojo upgrade --file` 的离线说明同步更新
+
 ## 0.8.4
 
 - **下载优先走 IPv4**：`urlopen error [Errno 101] Network is unreachable` 多半是只解析到 AAAA 记录、机器却没有 v6 出口。现在解析时先拿 A 记录，拿不到再退回原来的行为
