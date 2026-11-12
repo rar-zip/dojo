@@ -47,7 +47,7 @@ import tomllib
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.5"
+VERSION = "0.8.6"
 
 CONFIG_PATH = os.path.expanduser(os.environ.get("DOJO_CONFIG", "~/.config/dojo/config.toml"))
 STATE_DIR = os.path.expanduser(os.environ.get("DOJO_STATE_DIR", "~/.local/state/dojo"))

@@ -30,11 +30,24 @@ fi
 
 mkdir -p "$BIN_DIR" "$SHARE_DIR" "$CONF_DIR" "$STATE_DIR"
 chmod 700 "$STATE_DIR"
+mkdir -p "$STATE_DIR/backup"
 
-base64 -d <<'__DOJO_B64__' | gunzip > "$BIN_DIR/dojo"
+# 覆盖前先备份旧版；用 mv 而不是直接重定向，免得旧的是软链时写穿到仓库里的文件
+OLD_VER=""
+if [ -e "$BIN_DIR/dojo" ] || [ -L "$BIN_DIR/dojo" ]; then
+  OLD_VER="$("$BIN_DIR/dojo" version 2>/dev/null | awk '{print $2}' || true)"
+  cp -f "$BIN_DIR/dojo" "$STATE_DIR/backup/dojo-${OLD_VER:-unknown}" 2>/dev/null || true
+  if [ -n "$OLD_VER" ]; then
+    say "覆盖前的那版是 $OLD_VER，已备份到 $STATE_DIR/backup/dojo-$OLD_VER"
+  fi
+fi
+
+TMP_DOJO="$(mktemp "${TMPDIR:-/tmp}/dojo.XXXXXX")"
+base64 -d <<'__DOJO_B64__' | gunzip > "$TMP_DOJO"
 __DOJO_PAYLOAD__
 __DOJO_B64__
-chmod +x "$BIN_DIR/dojo"
+chmod +x "$TMP_DOJO"
+mv -f "$TMP_DOJO" "$BIN_DIR/dojo"
 
 base64 -d <<'__HOOK_B64__' | gunzip > "$SHARE_DIR/hook.bash"
 __HOOK_PAYLOAD__
@@ -106,8 +119,16 @@ if ! grep -q 'api_key = "[^"]' "$CONF" 2>/dev/null && [ -z "${DEEPSEEK_API_KEY:-
   say "  编辑 $CONF 填 [model] 里的 api_key，或者 export DEEPSEEK_API_KEY=sk-..."
 fi
 
+NEW_VER="$("$BIN_DIR/dojo" version 2>/dev/null | awk '{print $2}' || true)"
 say ""
-say "装好了。新开一个终端，或者 source $RC"
+if [ -n "$OLD_VER" ] && [ -n "$NEW_VER" ] && [ "$OLD_VER" != "$NEW_VER" ]; then
+  say "升级完成：$OLD_VER → $NEW_VER"
+elif [ -n "$NEW_VER" ]; then
+  say "装好了：$NEW_VER"
+else
+  say "装好了"
+fi
+say "新开一个终端，或者 source $RC"
 say "然后敲 dojo doctor 自检，dojo chat 直接开聊"
 '''
 

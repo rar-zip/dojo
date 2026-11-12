@@ -105,6 +105,12 @@ dojo uninstall         # 移除二进制软链与 Shell Hook 配置块
 dojo uninstall --purge # 彻底卸载并清除 ~/.config/dojo 与 ~/.local/state/dojo 全部数据
 ```
 
+`dojo upgrade` 挂了也可以直接重跑安装器，行为一样是覆盖安装：
+
+- 覆盖前把旧版备份到 `~/.local/state/dojo/backup/dojo-<旧版本号>`
+- 用 `mv` 落地而不是直接重定向，旧的是软链（源码安装）时不会写穿到仓库文件
+- 配置 `~/.config/dojo/config.toml` 只在不存在时创建，已有配置和状态全保留
+
 ## 日常只需要记三件事
 
 1. 报错了：空敲 **`dojo`**
