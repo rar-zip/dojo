@@ -3,6 +3,7 @@
 import importlib.util
 from importlib.machinery import SourceFileLoader
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -535,6 +536,7 @@ class TestExtra(unittest.TestCase):
             self.assertEqual(out.stdout.strip(), "40000", out.stderr)
         finally:
             srv.shutdown()
+            srv.server_close()
 
 
 
@@ -658,11 +660,13 @@ class TestHookStderrPTY(unittest.TestCase):
         finally:
             try:
                 proc.terminate()
-            except OSError:
+                proc.wait(timeout=10)
+            except (OSError, subprocess.TimeoutExpired):
                 pass
         out = buf.decode("utf-8", "replace")
-        # 回显把整条命令也打到屏幕上了，所以按行比对，别被回显里的字样骗了
-        lines = [ln.strip() for ln in out.splitlines()]
+        # 回显把整条命令也打到屏幕上了，还夹着 readline 的转义序列，先洗一遍再按行比对
+        clean = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", out)
+        lines = [ln.strip() for ln in clean.splitlines()]
         self.assertIn("TTY_IS_OK", lines)
         self.assertNotIn("TTY_NOT_OK", lines)
         # 只进日志不算数：stderr 必须同时回到终端屏幕上
@@ -976,8 +980,16 @@ class TestAcpAndFim(unittest.TestCase):
             err = json.loads(p.stdout.readline())
             self.assertEqual(err["error"]["code"], -32601)
         finally:
-            p.stdin.close()
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
             p.wait(timeout=10)
+            for stream in (p.stdout, p.stderr):
+                try:
+                    stream.close()
+                except (OSError, AttributeError):
+                    pass
 
     def test_acp_prompt_streams(self):
         import io
@@ -1037,6 +1049,49 @@ class TestV061Regressions(unittest.TestCase):
         name, args = m._cmd_args(["sudo", "--", "bash", "--noprofile", "-c", "apt install -y nginx"])
         self.assertEqual(name, "apt")
         self.assertEqual(args, ["install", "-y", "nginx"])
+
+    def test_hook_no_double_cr(self):
+        """程序自己写 \r\n 时，屏幕上不能再被转成 \r\r\n"""
+        import pty, select, time
+        home = os.path.join(self.tmp, "crlf")
+        conf = os.path.join(home, ".config", "dojo")
+        os.makedirs(conf)
+        with open(os.path.join(conf, "config.toml"), "w", encoding="utf-8") as f:
+            f.write("[context]\ncapture_stderr = true\n")
+        pid, master = pty.fork()
+        if pid == 0:
+            os.environ["HOME"] = home
+            os.environ["PS1"] = "P> "
+            os.execvp("bash", ["bash", "--noprofile", "--norc", "-i"])
+        buf = b""
+
+        def drain(seconds):
+            nonlocal buf
+            end = time.time() + seconds
+            while time.time() < end:
+                ready, _, _ = select.select([master], [], [], 0.1)
+                if ready:
+                    try:
+                        chunk = os.read(master, 4096)
+                    except OSError:
+                        return
+                    if not chunk:
+                        return
+                    buf += chunk
+        try:
+            drain(0.6)
+            os.write(master, b"source " + os.path.join(ROOT, "lib", "hook.bash").encode() + b"\n")
+            drain(1.2)
+            os.write(master, b"printf 'AAAA\\r\\n' >&2\n")
+            drain(1.5)
+            os.write(master, b"exit\n")
+        finally:
+            try:
+                os.close(master)
+            except OSError:
+                pass
+        self.assertIn(b"AAAA\r\n", buf)
+        self.assertNotIn(b"AAAA\r\r\n", buf)
 
     def test_commands_log_follows_state_dir_and_redacts(self):
         state = os.path.join(self.tmp, "state")
@@ -1103,8 +1158,16 @@ class TestV061Regressions(unittest.TestCase):
             self.assertEqual(cancel["id"], 7)
             self.assertEqual(cancel["result"], {})
         finally:
-            p.stdin.close()
+            try:
+                p.stdin.close()
+            except OSError:
+                pass
             p.wait(timeout=10)
+            for stream in (p.stdout, p.stderr):
+                try:
+                    stream.close()
+                except (OSError, AttributeError):
+                    pass
 
     def test_fim_url_non_deepseek(self):
         m = load_module()

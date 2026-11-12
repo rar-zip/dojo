@@ -47,7 +47,7 @@ if [ -f "$DOJO_CFG" ] \
     tail -c 262144 "$DOJO_ERR" > "$DOJO_ERR.tmp" 2>/dev/null && mv "$DOJO_ERR.tmp" "$DOJO_ERR"
   fi
   __dojo_slave=$(python3 - "$DOJO_ERR" <<'PY' 2>/dev/null
-import fcntl, os, pty, sys, termios
+import fcntl, os, pty, re, sys, termios
 
 log = sys.argv[1]
 os.makedirs(os.path.dirname(log), exist_ok=True)
@@ -93,6 +93,7 @@ if os.fork() == 0:
     threading.Timer(2.0, lambda: os.close(slave)).start()
     tty = fwd
     lf = open(log, "ab", buffering=0)
+    pending = b""
     while True:
         try:
             data = os.read(master, 65536)
@@ -105,8 +106,19 @@ if os.fork() == 0:
         except OSError:
             pass
         if tty is not None:
+            # 外层终端还会再转一次 \n，把多于一个的 \r 压掉，免得出 \r\r\n。
+            # \r 和 \n 可能被拆到两次 read 里，所以先攒住结尾的 \r
+            chunk = pending + data
+            tail = re.search(rb"\r+$", chunk)
+            if tail:
+                pending = chunk[tail.start():]
+                chunk = chunk[:tail.start()]
+            else:
+                pending = b""
+            chunk = re.sub(rb"\r+\n", b"\n", chunk)
             try:
-                os.write(tty, data)
+                if chunk:
+                    os.write(tty, chunk)
             except OSError:
                 tty = None
     os._exit(0)
